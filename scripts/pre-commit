@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+#
+# Safety pre-commit hook for apartment-search.
+# Blocks accidental commits of private data and secrets.
+# Install with:  git config core.hooksPath scripts
+#
+set -euo pipefail
+
+fail() { echo ""; echo "  ✗ COMMIT BLOCKED: $1"; echo ""; exit 1; }
+
+# Staged files (added/copied/modified), names only
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$staged" ] && exit 0
+
+# 1) Private / personal files that must never be committed ---------------------
+while IFS= read -r f; do
+  case "$f" in
+    config.local.json)        fail "config.local.json is private (your home base/commute). It is gitignored — don't force-add it." ;;
+    apartments_*.html|*.html) fail "generated report '$f' contains scraped listings + your commute. Don't commit reports." ;;
+    .env|*.key)               fail "'$f' looks like a secret file." ;;
+  esac
+done <<< "$staged"
+
+# 2) Secret-looking content in staged diffs ------------------------------------
+# Google Maps / Google API keys start with AIza...; also catch obvious key assigns.
+secret_re='AIza[0-9A-Za-z_\-]{20,}|(api[_-]?key|gmaps[_-]?key|secret|token)["'"'"' ]*[:=]["'"'"' ]*[A-Za-z0-9_\-]{16,}'
+if git diff --cached -U0 -- $(echo "$staged") | grep -nEi "$secret_re" >/dev/null 2>&1; then
+  echo ""
+  echo "  Potential secret found in staged changes:"
+  git diff --cached -U0 | grep -nEi "$secret_re" | head -5 | sed 's/^/    /'
+  fail "remove the secret (pass keys via --gmaps-key or config.local.json instead)."
+fi
+
+# 3) Oversized files (>2 MB) ---------------------------------------------------
+while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  sz=$(wc -c < "$f" 2>/dev/null || echo 0)
+  if [ "$sz" -gt 2097152 ]; then fail "'$f' is >2MB — likely not source. Use Git LFS or exclude it."; fi
+done <<< "$staged"
+
+echo "  ✓ pre-commit safety checks passed"
+exit 0

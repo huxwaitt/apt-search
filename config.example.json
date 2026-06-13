@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy this file to config.local.json and fill in YOUR usual search. config.local.json is gitignored so your home base / commute never get committed. Any key you omit falls back to the generic defaults in apartment_search.py.",
+  "location": "Your City",
+  "state": "ST",
+  "postal": "00000",
+  "min_price": 0,
+  "max_price": 3000,
+  "bedrooms": 2,
+  "radius": 10,
+  "metro_station": "Nearest Station",
+  "work_address": "Your Work Address"
+}

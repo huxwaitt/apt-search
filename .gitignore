@@ -1,0 +1,29 @@
+# ── Personal / private (never commit) ──
+# config.local.json holds your home base, commute, ZIP
+config.local.json
+# generated reports contain listings + your commute
+apartments_*.html
+*.html
+
+# ── Secrets ──
+.env
+*.key
+gmaps_key*.txt
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# ── Scratch / temp test files ──
+_*.py
+*.log
+
+# ── OS / editor ──
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
