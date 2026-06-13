@@ -118,8 +118,18 @@ def parse_args():
     p.add_argument("--gmaps-key", default=None)
     p.add_argument("--reviews", action="store_true",
                    help="Scrape Google/Yelp reviews (slow, often rate-limited)")
+    p.add_argument("--skip-link-check", action="store_true",
+                   help="Skip validating that each listing URL actually resolves")
     p.add_argument("--browser", choices=["auto", "chrome", "edge", "firefox"], default="auto",
                    help="Which browser to drive")
+    p.add_argument("--attach", action="store_true",
+                   help="Attach to an already-running Chrome (launched with "
+                        "--remote-debugging-port) instead of starting a fresh browser. "
+                        "Use this to get past Zillow's human check: open Chrome yourself, "
+                        "clear the check on zillow.com, then run with --attach.")
+    p.add_argument("--attach-port", type=int, default=None,
+                   help="Port to attach to with --attach (default 9222 for Chrome, "
+                        "2828 for Firefox's Marionette)")
     p.add_argument("--headless", action="store_true",
                    help="Run the browser headless (no visible window)")
     p.add_argument("--no-open", action="store_true",
@@ -160,8 +170,11 @@ def get_criteria(args):
     c["radius"]        = args.radius
     c["size_flexible"] = True
     c["reviews"]       = args.reviews
+    c["check_links"]   = not args.skip_link_check
     c["headless"]      = args.headless
     c["browser"]       = args.browser
+    c["attach"]        = args.attach
+    c["attach_port"]   = args.attach_port
     c["max_listings"]  = args.max_listings
     print()
     return c
@@ -302,6 +315,8 @@ def _blank_listing(**kw):
         "drive_miles": None, "drive_mins": None,
         "transit_distance": None, "transit_time": None,
         "parking_est": None, "pros": [], "cons": [],
+        "pets_dogs": None, "pets_cats": None,
+        "parking_free": None, "parking_price": None,
     }
     base.update(kw)
     return base
@@ -694,12 +709,54 @@ def _start_firefox(headless):
     driver.set_window_size(1440, 1000)
     return driver
 
-def make_driver(headless=False, preference="auto"):
+def _attach_chrome(port):
+    """Attach to a Chrome the user already started with --remote-debugging-port=<port>.
+    Because it's the user's own session, any Zillow 'Press & Hold' check they cleared
+    stays cleared. We must NOT quit this browser when done — it's theirs."""
+    opts = ChromeOptions()
+    opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{port}")
+    driver = webdriver.Chrome(options=opts)
+    driver._apt_attached = True
+    return driver
+
+def _attach_firefox(marionette_port):
+    """Attach to a Firefox the user started with `-marionette` (default port 2828) and a
+    separate profile. geckodriver's --connect-existing reuses that live session, so a Zillow
+    check they cleared carries over. We must NOT quit it — it's the user's browser."""
+    from selenium.webdriver.firefox.service import Service as FxService
+    service = FxService(service_args=["--connect-existing", "--marionette-port", str(marionette_port)])
+    driver = webdriver.Firefox(service=service)
+    driver._apt_attached = True
+    return driver
+
+def make_driver(headless=False, preference="auto", attach=False, attach_port=None):
     """
     Build a browser via Selenium Manager (auto-resolves the driver).
     preference: 'chrome', 'edge', 'firefox', or 'auto' (Chrome → Edge → Firefox).
     Firefox is often a useful alternative when a Chromium browser gets bot-flagged.
+    With attach=True, connect to the user's own browser (Chrome via --remote-debugging-port,
+    or Firefox via -marionette) so their cleared Zillow human-check carries over; falls back
+    to launching a fresh browser. Defaults: port 9222 for Chrome, 2828 for Firefox.
     """
+    if attach:
+        if preference == "firefox":
+            port = attach_port or 2828
+            try:
+                driver = _attach_firefox(port)
+                print(f"  Browser: attached to your Firefox (Marionette port {port})")
+                return driver
+            except Exception as e:
+                print(f"  Could not attach to Firefox on Marionette port {port}: {str(e).splitlines()[0]}")
+                print(f"  Falling back to launching a fresh browser (Zillow may show a check).")
+        else:
+            port = attach_port or 9222
+            try:
+                driver = _attach_chrome(port)
+                print(f"  Browser: attached to your Chrome on port {port}")
+                return driver
+            except Exception as e:
+                print(f"  Could not attach to Chrome on port {port}: {str(e).splitlines()[0]}")
+                print(f"  Falling back to launching a fresh browser (Zillow may show a check).")
     order = {
         "chrome":  [("Google Chrome", _start_chrome)],
         "edge":    [("Microsoft Edge", _start_edge)],
@@ -729,9 +786,178 @@ def deduplicate(apts):
             out.append(a)
     return out
 
+# ── Title normalization & listing-type detection ─────────────────────────────
+# Markers that strongly imply the unit is part of someone's home (a basement,
+# in-law suite, or a single room) rather than a standalone/complex apartment.
+ATTACHED_HOME_MARKERS = (
+    "english basement", "basement apartment", "basement apt", "basement for rent",
+    "basement", "walkout", "walk-out", "walk out entrance",
+    "in-law", "in law suite", "mother-in-law", "mother in law", "au pair",
+    "room for rent", "rooms for rent", "private room", "furnished room",
+    "room available", "room in a", "room in the", "single room", "bedroom for rent",
+    "roommate", "shared house", "share house", "share a house", "shared home",
+    "in a private home", "in private home", "in a single family", "in single family",
+    "in my home", "in my house", "in our home", "in our house",
+    "in a home", "in a house", "in a townhouse", "in a condo i live",
+    "live-in", "owner occupied", "owner-occupied",
+)
+
+def detect_attached_home(*texts):
+    """Return a short reason string if the listing looks attached to a home, else ''."""
+    blob = " ".join(t for t in texts if t).lower()
+    if not blob:
+        return ""
+    for marker in ATTACHED_HOME_MARKERS:
+        if marker in blob:
+            if "basement" in marker or "walkout" in marker or "walk-out" in marker or "walk out" in marker:
+                return "Basement unit attached to a home"
+            if "in-law" in marker or "in law" in marker or "au pair" in marker:
+                return "In-law / accessory unit within a home"
+            if "room" in marker or "bedroom for rent" in marker or "roommate" in marker:
+                return "Single room rented within a home"
+            if "shared" in marker or "share" in marker:
+                return "Shared house — not a private unit"
+            return "Unit attached to someone's home"
+    return ""
+
+def normalize_title(apt):
+    """
+    Build a concise, factual title summarizing what the listing actually is,
+    replacing Craigslist/marketing fluff like 'Put a smile on your face!'.
+    Examples: '1-Bedroom apartment · 1 bath · 712 sqft · Falls Church',
+              '1-Bedroom basement apartment · Arlington'.
+    """
+    blob = f"{apt.get('raw_name','')} {apt.get('description','')}"
+
+    beds = apt.get("beds")
+    if beds == 0:
+        bed_str = "Studio"
+    elif beds:
+        bed_str = f"{beds}-Bedroom"
+    else:
+        bed_str = None
+
+    # Bath count, if it can be read from the original text (e.g. "1B/1B", "2 bath")
+    bath = None
+    m = re.search(r"(\d+(?:\.\d)?)\s*(?:ba\b|bath)", blob, re.I)
+    if not m:
+        m = re.search(r"\d+\s*b(?:r|d)?\s*/\s*(\d+(?:\.\d)?)\s*ba", blob, re.I)
+    if m:
+        bath = m.group(1).rstrip(".0") or m.group(1)
+
+    # Listing type from attached-home detection
+    reason = apt.get("attached_home") or ""
+    rl = reason.lower()
+    if "basement" in rl:
+        type_word = "basement apartment"
+    elif "in-law" in rl or "accessory" in rl:
+        type_word = "in-law unit"
+    elif "room" in rl:
+        type_word = "room in a home"
+    elif "shared" in rl:
+        type_word = "room in a shared house"
+    elif reason:
+        type_word = "unit in a private home"
+    else:
+        type_word = "apartment"
+
+    # Head phrase
+    if type_word == "room in a home" or type_word == "room in a shared house":
+        head = type_word.capitalize() if not bed_str or bed_str == "Studio" else type_word.capitalize()
+    elif bed_str:
+        head = f"{bed_str} {type_word}"
+    else:
+        head = type_word.capitalize()
+
+    parts = [head]
+    if bath:
+        parts.append(f"{bath} bath")
+    if apt.get("sqft"):
+        parts.append(f"{apt['sqft']:,} sqft")
+    locality = (apt.get("address") or "").strip()
+    if locality:
+        parts.append(locality)
+    return " · ".join(parts)
+
+# ── Link validation ───────────────────────────────────────────────────────────
+def validate_link(url):
+    """Return True if the listing URL actually resolves (HTTP < 400), False if it's
+    broken/expired, or None if there's no real URL to check. Tries a cheap HEAD first,
+    falling back to GET for servers that reject HEAD."""
+    if not url or not url.startswith("http"):
+        return None
+    try:
+        r = SESSION.head(url, allow_redirects=True, timeout=8)
+        if r.status_code == 405 or r.status_code >= 400:
+            r = SESSION.get(url, allow_redirects=True, timeout=10, stream=True)
+        return r.status_code < 400
+    except Exception:
+        return False
+
+# ── Pet & parking policy detection ────────────────────────────────────────────
+def detect_pets(text):
+    """Read a listing's text for pet policy. Returns (dogs, cats), each True (allowed),
+    False (explicitly not allowed), or None (not stated)."""
+    t = (text or "").lower()
+    dogs = cats = None
+    # "Dog and Cat friendly" / "cats and dogs welcome" → both.
+    if re.search(r"(dogs?\s+and\s+cats?|cats?\s+and\s+dogs?)[\s-]*(friendly|welcome|ok|okay|allowed)", t):
+        dogs = True; cats = True
+    # Generic pet-friendly implies both, unless contradicted below.
+    if re.search(r"pet[\s-]?friendly|pets?\s+(ok|okay|welcome|allowed|considered)|we welcome your pets|pet lover|pet[\s-]?lover", t):
+        dogs = True; cats = True
+    if re.search(r"dogs?\s+(ok|okay|welcome|allowed|considered)|dog[\s-]?friendly", t):
+        dogs = True
+    if re.search(r"cats?\s+(ok|okay|welcome|allowed|considered)|cat[\s-]?friendly", t):
+        cats = True
+    # Explicit negatives override positives.
+    if re.search(r"no pets|pets?\s+not\s+allowed|no animals|sorry,?\s*no pets", t):
+        dogs = False; cats = False
+    if "no dogs" in t:
+        dogs = False
+    if "no cats" in t:
+        cats = False
+    return dogs, cats
+
+def detect_parking(text):
+    """Read a listing's text for parking. Returns (free, price): free True (free/included),
+    False (paid), or None (not stated); price = monthly $ if a number is stated, else None."""
+    t = (text or "").lower()
+    free = None
+    price = None
+    if re.search(r"free parking|parking (is )?(free|included)|includes? .{0,15}parking|"
+                 r"parking included|complimentary parking|no[\s-]?cost parking|parking at no", t):
+        free = True; price = 0
+    # A dollar figure near the word "parking" → paid parking with a known price.
+    m = (re.search(r"parking[^$\n]{0,25}\$\s?([\d,]{2,5})", t)
+         or re.search(r"\$\s?([\d,]{2,5})[^$\n]{0,15}parking", t))
+    if m:
+        price = int(m.group(1).replace(",", "")); free = False
+    return free, price
+
 # ── Enrichment: Distance & Reviews ───────────────────────────────────────────
 def infer_pros_cons(apt, criteria, metro_coords):
     pros, cons = [], []
+    if apt.get("attached_home"):
+        cons.append(apt["attached_home"])
+    if apt.get("link_ok") is False:
+        cons.append("Listing link appears broken or expired")
+    # Pets
+    if apt.get("pets_dogs"):
+        pros.append("Dogs welcome")
+    if apt.get("pets_cats"):
+        pros.append("Cats welcome")
+    if apt.get("pets_dogs") is False and apt.get("pets_cats") is False:
+        cons.append("No pets allowed")
+    elif apt.get("pets_dogs") is False:
+        cons.append("No dogs")
+    elif apt.get("pets_cats") is False:
+        cons.append("No cats")
+    # Parking
+    if apt.get("parking_free"):
+        pros.append("Free parking")
+    elif apt.get("parking_price"):
+        cons.append(f"Paid parking ~${apt['parking_price']}/mo")
     if apt["price"] and apt["price"] <= criteria["max_price"] * 0.8:
         pros.append("Well under budget")
     if apt["price"] and apt["price"] > criteria["max_price"] * 0.95:
@@ -901,6 +1127,23 @@ def enrich_apartments(apts, criteria, metro_coords, work_coords):
 
         # Parking estimate
         apt["parking_est"] = estimate_parking(apt["address"], criteria["location"])
+
+        # Detect whether the unit is attached to someone's home (basement/room/in-law),
+        # then rewrite the title into a clean factual summary.
+        apt["attached_home"] = detect_attached_home(
+            apt.get("name"), apt.get("description"), apt.get("address")
+        )
+        apt["raw_name"] = apt.get("name", "")
+        apt["name"] = normalize_title(apt)
+
+        # Validate that the listing link actually resolves
+        apt["link_ok"] = validate_link(apt.get("url")) if criteria.get("check_links", True) else None
+
+        # Pet policy (dogs/cats separately) and parking (free vs paid + price) from the
+        # original listing text — use raw_name since name was just normalized.
+        pet_blob = f"{apt.get('raw_name','')} {apt.get('description','')}"
+        apt["pets_dogs"], apt["pets_cats"] = detect_pets(pet_blob)
+        apt["parking_free"], apt["parking_price"] = detect_parking(pet_blob)
 
         # Reviews (Google + Yelp) — opt-in; slow and frequently rate-limited
         if criteria.get("reviews"):
@@ -1403,8 +1646,19 @@ function openModal(idx) {{
     ? `<img class="m-photo" src="${{a.image}}" alt="" onerror="this.outerHTML='<div class=m-photo-none>No photo available</div>'">`
     : '<div class="m-photo-none">No photo available</div>';
 
-  const parking   = a.parking_est ? `~$${{a.parking_est}}/mo` : '—';
-  const total     = (a.price||0) + (a.parking_est||0);
+  // Parking: prefer what the listing actually states (free / a real price), else fall
+  // back to the city-tier estimate and clearly label it as an estimate.
+  const parkCost  = a.parking_free ? 0 : (a.parking_price != null ? a.parking_price : (a.parking_est||0));
+  const parking   = a.parking_free ? 'Free'
+                    : (a.parking_price != null ? '$'+a.parking_price.toLocaleString()+'/mo'
+                    : (a.parking_est ? '~$'+a.parking_est+'/mo (est.)' : '—'));
+  const total     = (a.price||0) + parkCost;
+  const petsTxt   = (() => {{
+    const p = [];
+    if (a.pets_dogs===true) p.push('Dogs ✓'); else if (a.pets_dogs===false) p.push('Dogs ✗');
+    if (a.pets_cats===true) p.push('Cats ✓'); else if (a.pets_cats===false) p.push('Cats ✗');
+    return p.length ? p.join(' · ') : 'Not stated';
+  }})();
   const transit   = a.transit_time ? `${{a.transit_distance}} · ${{a.transit_time}}` : (a.drive_mins ? `~${{a.drive_mins}} min drive` : '—');
   const prosHTML  = (a.pros||[]).length ? (a.pros||[]).map(p=>`<li>${{p}}</li>`).join('') : '<li style="color:var(--text3)">None noted</li>';
   const consHTML  = (a.cons||[]).length ? (a.cons||[]).map(c=>`<li>${{c}}</li>`).join('') : '<li style="color:var(--text3)">None noted</li>';
@@ -1442,7 +1696,8 @@ function openModal(idx) {{
         <div class="m-grid">
           <div class="m-cell"><div class="lbl">Bedrooms</div><div class="val">${{a.beds!=null?(a.beds===0?'Studio':a.beds+' bed'):'—'}}</div></div>
           <div class="m-cell"><div class="lbl">Size</div><div class="val">${{a.sqft?a.sqft.toLocaleString()+' sqft':'—'}}</div></div>
-          <div class="m-cell"><div class="lbl">Parking est.</div><div class="val">${{a.parking_est?'~$'+a.parking_est+'/mo':'—'}}</div></div>
+          <div class="m-cell"><div class="lbl">Parking</div><div class="val">${{parking}}</div></div>
+          <div class="m-cell"><div class="lbl">Pets</div><div class="val">${{petsTxt}}</div></div>
           <div class="m-cell"><div class="lbl">Source</div><div class="val">${{a.source}}</div></div>
         </div>
       </div>
@@ -1451,7 +1706,7 @@ function openModal(idx) {{
         <div class="m-sec-title">Monthly costs</div>
         <div class="cost-rows">
           <div class="cost-row"><span>Rent</span><span>${{a.price?'$'+a.price.toLocaleString():'—'}}</span></div>
-          <div class="cost-row"><span>Est. parking</span><span>${{parking}}</span></div>
+          <div class="cost-row"><span>Parking</span><span>${{parking}}</span></div>
           <div class="cost-row"><span>Estimated total</span><span>${{total?'$'+total.toLocaleString():'—'}}</span></div>
         </div>
       </div>
@@ -1561,7 +1816,9 @@ def main():
     if SELENIUM:
         print("  Starting browser...")
         driver = make_driver(headless=criteria.get("headless", False),
-                             preference=criteria.get("browser", "auto"))
+                             preference=criteria.get("browser", "auto"),
+                             attach=criteria.get("attach", False),
+                             attach_port=criteria.get("attach_port"))
 
     if driver is not None:
         try:
@@ -1572,10 +1829,12 @@ def main():
         except Exception as e:
             print(f"  Browser search error: {e}")
         finally:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            # Never close the user's own browser when we attached to it.
+            if not getattr(driver, "_apt_attached", False):
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
     else:
         print("  No browser available — cannot search JS-rendered sites.")
 
@@ -1591,6 +1850,15 @@ def main():
     if apartments:
         apartments = enrich_apartments(apartments, criteria, metro_coords, work_coords)
         apartments.sort(key=lambda a: a["price"] or 999999)
+
+        # Report link-validation results (a completion checkpoint the Stop hook verifies)
+        if criteria.get("check_links", True):
+            checked = [a for a in apartments if a.get("link_ok") is not None]
+            reachable = [a for a in checked if a.get("link_ok")]
+            if checked:
+                print(f"[OK] Link check: {len(reachable)}/{len(checked)} listing links reachable")
+            else:
+                print("[OK] Link check: no checkable links found")
 
     # Generate HTML
     print("\nGenerating HTML report...")
