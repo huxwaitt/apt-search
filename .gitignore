@@ -4,6 +4,8 @@ config.local.json
 # generated reports contain listings + your commute
 apartments_*.html
 *.html
+# ...except the curated design showcase (neutral demo data)
+!docs/sample.html
 
 # ── Secrets ──
 .env

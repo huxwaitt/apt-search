@@ -7,6 +7,9 @@ work-commute distances, and generates a self-contained, interactive HTML report.
 It ships as a **Claude Code skill** (`SKILL.md`) — you trigger it in Claude and it runs the
 script for you — but it also runs standalone from the command line.
 
+**[→ See a sample report](docs/sample.html)** (open it raw, or download and open in a browser)
+— rendered from the built-in template with neutral demo data.
+
 ## Quick start
 
 ```bash

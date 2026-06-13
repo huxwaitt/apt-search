@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Apartments — Chicago, IL</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Hanken+Grotesk:wght@400;500;600&display=swap');
+
+/* ── Reset ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; font-size: 16px; }
+body {
+  font-family: 'Hanken Grotesk', -apple-system, system-ui, sans-serif;
+  background: var(--bg); color: var(--text);
+  min-height: 100vh; line-height: 1.6;
+  font-feature-settings: 'tnum' 1;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Tokens: warm paper & ink, one clay accent ── */
+:root {
+  --bg:      #f7f5ef;
+  --surface: #f7f5ef;
+  --raised:  #fffefb;
+  --border:  #e6e1d4;
+  --border2: #d6d0c0;
+  --text:    #1b1a16;
+  --text2:   #6b6657;
+  --text3:   #9c9684;
+  --accent:  #9e4a2e;
+  --accent2: #b86a4b;
+  --g-amber: #b08400;
+  --y-red:   #9e4a2e;
+  --green:   #46603e;
+  --red:     #9e4a2e;
+  --radius:  3px;
+  --radius-s:2px;
+  --serif:   'Fraunces', Georgia, serif;
+}
+[data-theme="dark"] {
+  --bg:      #15140f;
+  --surface: #15140f;
+  --raised:  #1d1b15;
+  --border:  #2b291f;
+  --border2: #3a382c;
+  --text:    #ece7da;
+  --text2:   #a39d8b;
+  --text3:   #6f6a59;
+  --accent:  #cf855f;
+  --accent2: #e0a07f;
+  --g-amber: #d9b25a;
+  --y-red:   #cf855f;
+  --green:   #9ab089;
+  --red:     #cf855f;
+}
+
+::selection { background: var(--accent); color: var(--bg); }
+
+/* ── Header ── */
+header { background: var(--bg); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100; }
+.header-inner {
+  max-width: 1180px; margin: 0 auto;
+  display: flex; align-items: baseline; gap: 2rem;
+  padding: 0 2.5rem; height: 84px;
+}
+.logo {
+  font-family: var(--serif); font-size: 1.5rem; font-weight: 500;
+  color: var(--text); letter-spacing: -.01em; white-space: nowrap; flex-shrink: 0;
+}
+.logo-meta { font-family: 'Hanken Grotesk'; color: var(--text3); font-weight: 400; margin-left: .6rem; font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; }
+.search-wrap {
+  flex: 1; max-width: 280px; display: flex; align-items: center; gap: .55rem;
+  background: transparent; border: none; border-bottom: 1px solid var(--border2);
+  border-radius: 0; padding: .3rem .1rem; transition: border-color .2s;
+}
+.search-wrap:focus-within { border-color: var(--accent); }
+.search-wrap svg { color: var(--text3); flex-shrink: 0; }
+.search-wrap input { border: none; background: transparent; width: 100%; font-size: .82rem; color: var(--text); outline: none; font-family: inherit; }
+.search-wrap input::placeholder { color: var(--text3); }
+.hdr-right { margin-left: auto; display: flex; gap: 1.5rem; align-items: baseline; }
+.hdr-count { font-size: .72rem; color: var(--text3); letter-spacing: .06em; text-transform: uppercase; }
+.hdr-count strong { color: var(--text); font-weight: 600; }
+.hdr-btn {
+  font-size: .72rem; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--text3); background: none; border: none; cursor: pointer;
+  padding: 0; transition: color .2s; font-family: inherit;
+}
+.hdr-btn:hover { color: var(--accent); }
+
+/* ── Layout ── */
+.layout { max-width: 1180px; margin: 0 auto; display: grid; grid-template-columns: 200px 1fr; gap: 3.5rem; padding: 3rem 2.5rem 5rem; }
+
+/* ── Sidebar ── */
+aside { position: sticky; top: 108px; align-self: start; max-height: calc(100vh - 130px); overflow-y: auto; padding-right: .25rem; }
+aside::-webkit-scrollbar { width: 0; }
+.sb-section { margin-bottom: 2.25rem; }
+.sb-title { font-size: .66rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--text3); margin-bottom: 1.1rem; display: block; }
+.sb-row { margin-bottom: 1rem; }
+.sb-label { font-size: .8rem; color: var(--text2); display: flex; justify-content: space-between; margin-bottom: .7rem; }
+.sb-label span { font-family: var(--serif); color: var(--text); font-weight: 500; font-size: .95rem; }
+input[type=range] { width: 100%; accent-color: var(--accent); height: 1px; cursor: pointer; display: block; }
+.range-ends { display: flex; justify-content: space-between; font-size: .68rem; color: var(--text3); margin-top: .5rem; letter-spacing: .03em; }
+.check-list { display: flex; flex-direction: column; gap: .1rem; }
+.check-item { display: flex; align-items: center; gap: .6rem; font-size: .82rem; color: var(--text2); cursor: pointer; padding: .3rem 0; transition: color .15s; }
+.check-item input { accent-color: var(--accent); cursor: pointer; width: 13px; height: 13px; }
+.check-item:hover { color: var(--text); }
+.src-list { display: flex; flex-wrap: wrap; gap: .4rem; }
+.src-tag { font-size: .72rem; padding: .25rem 0; margin-right: .9rem; border: none; color: var(--text3); cursor: pointer; user-select: none; border-bottom: 1px solid transparent; transition: all .15s; }
+.src-tag.on { color: var(--text); border-bottom-color: var(--accent); }
+.sb-select { width: 100%; font-family: inherit; font-size: .82rem; color: var(--text); background: transparent; border: none; border-bottom: 1px solid var(--border2); border-radius: 0; padding: .4rem 0; cursor: pointer; outline: none; transition: border-color .2s; }
+.sb-select:focus { border-color: var(--accent); }
+.sb-divider { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+.sb-meta { font-size: .76rem; color: var(--text3); line-height: 2; }
+.sb-meta strong { color: var(--text2); font-weight: 500; }
+
+/* ── Stats: oversized serif numerals ── */
+.stats-bar { display: flex; gap: 3rem; margin-bottom: 2.75rem; padding-bottom: 0; border: none; flex-wrap: wrap; }
+.stat-n { font-family: var(--serif); font-size: 2.4rem; font-weight: 400; color: var(--text); letter-spacing: -.02em; line-height: 1; }
+.stat-l { font-size: .66rem; color: var(--text3); text-transform: uppercase; letter-spacing: .12em; margin-top: .6rem; }
+
+/* ── Toolbar ── */
+.toolbar { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
+.toolbar-left { font-size: .72rem; color: var(--text3); letter-spacing: .08em; text-transform: uppercase; }
+.view-btns { display: flex; gap: 1.25rem; }
+.v-btn { padding: 0; font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; border: none; background: none; color: var(--text3); cursor: pointer; transition: color .2s; font-family: inherit; }
+.v-btn.on { color: var(--accent); }
+
+/* ── Cards: airy, borderless, hairline separated ── */
+.grid-wrap { border: none; border-radius: 0; overflow: visible; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 2.75rem 2.5rem; }
+.grid.list { grid-template-columns: 1fr; gap: 0; }
+
+.card { background: transparent; cursor: pointer; border: none; display: flex; flex-direction: column; transition: transform .25s ease; }
+.card:last-child { border: none; }
+.grid:not(.list) .card { border: none; }
+.card:hover { background: transparent; transform: translateY(-3px); }
+.card:hover .card-name { color: var(--accent); }
+.grid.list .card { flex-direction: row; gap: 1.75rem; align-items: flex-start; padding: 1.75rem 0; border-bottom: 1px solid var(--border); transition: none; }
+.grid.list .card:hover { transform: none; }
+.grid.list .card-photo { width: 200px; flex-shrink: 0; }
+.grid.list .card-body { flex: 1; }
+
+.card-photo { position: relative; height: 210px; background: var(--border); overflow: hidden; flex-shrink: 0; border-radius: 2px; }
+.card-photo img { width: 100%; height: 100%; object-fit: cover; display: block; filter: grayscale(1) contrast(.96); transition: filter .5s ease, transform .6s ease; }
+.card:hover .card-photo img { filter: grayscale(0); transform: scale(1.03); }
+.card-photo-none { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text3); font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; font-family: var(--serif); font-style: italic; }
+.card-source { position: absolute; top: .7rem; left: .7rem; font-size: .6rem; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--text); background: var(--bg); padding: .25rem .5rem; border-radius: 2px; }
+
+.card-body { padding: 1.1rem .15rem 0; flex: 1; display: flex; flex-direction: column; gap: .55rem; }
+.card-name { font-family: var(--serif); font-size: 1.12rem; font-weight: 500; color: var(--text); line-height: 1.3; letter-spacing: -.01em; transition: color .2s; }
+.card-addr { font-size: .76rem; color: var(--text3); letter-spacing: .02em; }
+.card-price { font-family: var(--serif); font-size: 1.35rem; font-weight: 500; color: var(--text); letter-spacing: -.01em; margin-top: .15rem; }
+.card-price .mo { font-family: 'Hanken Grotesk'; font-size: .72rem; font-weight: 400; color: var(--text3); }
+.card-price .contact { font-family: var(--serif); font-style: italic; font-size: .95rem; font-weight: 400; color: var(--text3); }
+
+.card-chips { display: flex; gap: 1rem; flex-wrap: wrap; }
+.chip { font-size: .74rem; color: var(--text2); background: transparent; border: none; border-radius: 0; padding: 0; position: relative; }
+.chip + .chip::before { content: ""; position: absolute; left: -.5rem; top: 50%; width: 2px; height: 2px; border-radius: 50%; background: var(--border2); transform: translateY(-50%); }
+
+.card-reviews { display: flex; gap: .9rem; align-items: center; }
+.rev-badge { display: flex; align-items: center; gap: .35rem; font-size: .74rem; }
+.rev-badge .stars { color: var(--g-amber); letter-spacing: -.05em; font-size: .72rem; }
+.rev-badge .score { font-weight: 600; color: var(--text); }
+.rev-badge .ct { color: var(--text3); }
+.rev-badge .brand { font-size: .6rem; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--text3); }
+.rev-badge.yelp .stars { color: var(--y-red); }
+.rev-sep { color: var(--border2); font-size: .7rem; }
+
+.card-dist { font-size: .76rem; color: var(--text2); display: flex; flex-direction: column; gap: .3rem; padding-top: .35rem; border-top: 1px solid var(--border); margin-top: .25rem; }
+.dist-row { display: flex; justify-content: space-between; gap: .5rem; }
+.dist-label { color: var(--text3); white-space: nowrap; letter-spacing: .02em; }
+.dist-val { font-weight: 500; color: var(--text2); text-align: right; }
+
+.card-tags { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .15rem; padding-top: 0; }
+.tag { font-size: .68rem; padding: 0; border-radius: 0; font-weight: 500; letter-spacing: .01em; }
+.tag.pro { background: transparent; color: var(--green); border: none; }
+.tag.pro::before { content: "+ "; }
+.tag.con { background: transparent; color: var(--accent); border: none; }
+.tag.con::before { content: "– "; }
+.tag + .tag { margin-left: .35rem; }
+
+.card-link { padding: 0; border-top: none; display: none; }
+
+/* ── Empty ── */
+.empty { padding: 6rem 2rem; text-align: center; color: var(--text3); grid-column: 1 / -1; }
+.empty strong { font-family: var(--serif); font-weight: 500; font-size: 1.15rem; color: var(--text2); }
+.empty p { font-size: .82rem; margin-top: .6rem; }
+
+/* ── Modal ── */
+.overlay { display: none; position: fixed; inset: 0; background: color-mix(in srgb, var(--text) 22%, transparent); backdrop-filter: blur(3px); z-index: 200; align-items: center; justify-content: center; padding: 1.5rem; }
+.overlay.open { display: flex; animation: fade .25s ease; }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+.modal { background: var(--raised); border-radius: 3px; max-width: 580px; width: 100%; max-height: 92vh; overflow-y: auto; border: 1px solid var(--border); position: relative; box-shadow: 0 30px 80px -20px color-mix(in srgb, var(--text) 35%, transparent); }
+.modal::-webkit-scrollbar { width: 0; }
+.m-close { position: absolute; top: 1.1rem; right: 1.1rem; width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--border2); background: var(--raised); color: var(--text2); cursor: pointer; z-index: 5; display: flex; align-items: center; justify-content: center; font-size: .8rem; transition: all .2s; }
+.m-close:hover { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.m-photo { width: 100%; height: 240px; object-fit: cover; display: block; filter: grayscale(.35); }
+.m-photo-none { width: 100%; height: 120px; background: var(--border); display: flex; align-items: center; justify-content: center; color: var(--text3); font-family: var(--serif); font-style: italic; font-size: .82rem; }
+.m-body { padding: 2rem 2.25rem 2.25rem; }
+.m-source { font-size: .62rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); margin-bottom: .6rem; }
+.m-name { font-family: var(--serif); font-size: 1.55rem; font-weight: 500; color: var(--text); line-height: 1.2; letter-spacing: -.02em; margin-bottom: .35rem; }
+.m-addr { font-size: .8rem; color: var(--text3); margin-bottom: 1.75rem; }
+.m-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 2rem; padding-bottom: 1.75rem; border-bottom: 1px solid var(--border); }
+.m-price { font-family: var(--serif); font-size: 2.1rem; font-weight: 500; color: var(--text); letter-spacing: -.03em; }
+.m-price .mo { font-family: 'Hanken Grotesk'; font-size: .8rem; font-weight: 400; color: var(--text3); }
+.m-reviews-block { display: flex; flex-direction: column; gap: .45rem; align-items: flex-end; }
+.m-rev-row { display: flex; align-items: center; gap: .4rem; font-size: .78rem; text-decoration: none; }
+.m-rev-row .brand { font-size: .6rem; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; width: 40px; color: var(--text3); }
+.m-rev-row .stars { letter-spacing: -.05em; }
+.m-rev-row .g-stars { color: var(--g-amber); }
+.m-rev-row .y-stars { color: var(--y-red); }
+.m-rev-row .score { font-weight: 600; color: var(--text); }
+.m-rev-row .ct { color: var(--text3); }
+.m-rev-row:hover .score { color: var(--accent); }
+.m-sec { margin-bottom: 2rem; }
+.m-sec-title { font-size: .62rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--text3); margin-bottom: 1.1rem; padding-bottom: 0; border-bottom: none; }
+.m-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem 1.75rem; }
+.m-cell { padding: 0; background: transparent; border-radius: 0; border-bottom: 1px solid var(--border); padding-bottom: .7rem; }
+.m-cell .lbl { font-size: .64rem; text-transform: uppercase; letter-spacing: .1em; color: var(--text3); }
+.m-cell .val { font-family: var(--serif); font-size: 1.05rem; font-weight: 500; color: var(--text); margin-top: .35rem; }
+.cost-rows { display: flex; flex-direction: column; gap: 0; }
+.cost-row { display: flex; justify-content: space-between; font-size: .85rem; padding: .65rem 0; border-bottom: 1px solid var(--border); color: var(--text2); }
+.cost-row:last-child { border-bottom: none; font-family: var(--serif); font-weight: 500; color: var(--text); font-size: 1.05rem; padding-top: .9rem; }
+.cost-row span:last-child { font-weight: 600; }
+.pc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
+.pc-col { padding: 0; background: transparent; border-radius: 0; border-top: 1px solid var(--border); padding-top: .9rem; }
+.pc-col.pros, .pc-col.cons { border-top: 1px solid var(--border); }
+.pc-col h4 { font-size: .62rem; font-weight: 600; text-transform: uppercase; letter-spacing: .1em; margin-bottom: .8rem; color: var(--text3); }
+.pc-col ul { list-style: none; display: flex; flex-direction: column; gap: .5rem; }
+.pc-col ul li { font-size: .82rem; color: var(--text2); padding-left: 1rem; position: relative; line-height: 1.45; }
+.pc-col.pros ul li::before { content: "+"; position: absolute; left: 0; color: var(--green); }
+.pc-col.cons ul li::before { content: "–"; position: absolute; left: 0; color: var(--accent); }
+.m-link { display: inline-block; text-align: left; margin-top: 1.5rem; padding: 0 0 .25rem; background: transparent; color: var(--text); border-bottom: 1px solid var(--accent); border-radius: 0; font-family: var(--serif); font-size: 1rem; font-weight: 500; text-decoration: none; transition: color .2s; }
+.m-link::after { content: " \2197"; }
+.m-link:hover { color: var(--accent); }
+
+/* ── Responsive ── */
+@media (max-width: 860px) {
+  .layout { grid-template-columns: 1fr; gap: 2.5rem; }
+  aside { position: static; max-height: none; }
+  .header-inner { padding: 0 1.5rem; height: 72px; gap: 1.25rem; }
+  .grid { grid-template-columns: 1fr 1fr; gap: 2rem 1.5rem; }
+}
+@media (max-width: 560px) {
+  .grid { grid-template-columns: 1fr; }
+  .layout { padding: 2rem 1.5rem 3rem; }
+  .search-wrap { display: none; }
+  .m-top { flex-direction: column; gap: .75rem; }
+  .m-reviews-block { align-items: flex-start; }
+  .m-grid, .pc-grid { grid-template-columns: 1fr; gap: 1.25rem; }
+  .stats-bar { gap: 2rem; }
+}
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="logo">Chicago, IL<span class="logo-meta">· June 13, 2026</span></div>
+    <div class="search-wrap">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" id="searchInput" placeholder="Search listings…" oninput="filterCards()">
+    </div>
+    <div class="hdr-right">
+      <span class="hdr-count"><strong id="countBadge">0</strong> listings</span>
+      <button class="hdr-btn" onclick="toggleTheme()">Light / Dark</button>
+      <button class="hdr-btn" onclick="window.print()">Print</button>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <aside>
+    <div class="sb-section">
+      <span class="sb-title">Price</span>
+      <div class="sb-row">
+        <div class="sb-label">Max rent <span id="priceVal">$2500</span>/mo</div>
+        <input type="range" id="priceFilter" min="0" max="3000"
+               value="3000" step="50" oninput="updatePrice(this.value);filterCards()">
+        <div class="range-ends"><span>$0</span><span>$3000</span></div>
+      </div>
+    </div>
+
+    <div class="sb-section">
+      <span class="sb-title">Bedrooms</span>
+      <div class="check-list" id="bedsFilter">
+        <label class="check-item"><input type="checkbox" value="0" onchange="filterCards()"> Studio</label>
+        <label class="check-item"><input type="checkbox" value="1" onchange="filterCards()"> 1 bed</label>
+        <label class="check-item"><input type="checkbox" value="2" onchange="filterCards()"> 2 beds</label>
+        <label class="check-item"><input type="checkbox" value="3" onchange="filterCards()"> 3+ beds</label>
+      </div>
+    </div>
+
+    <div class="sb-section">
+      <span class="sb-title">Source</span>
+      <div class="src-list" id="sourcePills"></div>
+    </div>
+
+    <div class="sb-section">
+      <span class="sb-title">Sort</span>
+      <select class="sb-select" onchange="sortCards(this.value)">
+        <option value="price">Price: low to high</option>
+        <option value="price_desc">Price: high to low</option>
+        <option value="metro">Metro distance</option>
+        <option value="commute">Commute time</option>
+        <option value="rating">Google rating</option>
+      </select>
+    </div>
+
+    <hr class="sb-divider">
+
+    <div class="sb-meta">
+      <div><strong>Location</strong> Chicago, IL</div>
+      <div><strong style="color:var(--text)">Metro:</strong> Fullerton</div>
+      <div><strong style="color:var(--text)">Work:</strong> The Loop, Chicago, IL</div>
+      <div><strong>Budget</strong> $0 – $2500/mo</div>
+      <div><strong style="color:var(--text)">Beds:</strong> Any</div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="stats-bar" id="statsBar"></div>
+
+    <div class="toolbar">
+      <span class="toolbar-left" id="toolbarLabel"></span>
+      <div class="view-btns">
+        <button class="v-btn on" onclick="setView('grid',this)">Grid</button>
+        <button class="v-btn" onclick="setView('list',this)">List</button>
+      </div>
+    </div>
+
+    <div class="grid-wrap">
+      <div class="grid" id="cardsGrid"></div>
+    </div>
+  </main>
+</div>
+
+<!-- Modal -->
+<div class="overlay" id="overlay" onclick="closeModal(event)">
+  <div class="modal" id="modal">
+    <button class="m-close" onclick="closeModal()">&#x2715;</button>
+    <div id="modalContent"></div>
+  </div>
+</div>
+
+<script>
+const DATA = [{"source": "Craigslist", "name": "Sunlit 2BR in Lincoln Park with bay windows", "price": 2195, "price_note": "Contact for price", "beds": 2, "sqft": 950, "address": "Fullerton Ave, Lincoln Park", "coords": [41.925, -87.65], "url": "https://example.com/1", "image": "https://images.unsplash.com/photo-1502672260266-1c1ef2d93688?w=800", "description": "", "rating": null, "reviews": [], "metro_walk_miles": 0.4, "metro_walk_mins": 7, "metro_drive_miles": 0.9, "metro_drive_mins": 3, "drive_miles": 6.1, "drive_mins": 22, "transit_distance": null, "transit_time": null, "parking_est": 200, "pros": ["Well under budget", "Spacious at 950 sqft", "Short 7 min walk to metro"], "cons": ["Street parking only"], "google_rating": 4.4, "google_count": 212, "google_url": "https://maps.google.com", "yelp_rating": 4.0, "yelp_count": 88, "yelp_url": "https://yelp.com"}, {"source": "Zillow", "name": "Modern loft near the Loop", "price": 2480, "price_note": "Contact for price", "beds": 2, "sqft": 1080, "address": "W Lake St, West Loop", "coords": [41.885, -87.66], "url": "https://example.com/2", "image": "https://images.unsplash.com/photo-1522708323590-d24dbb6b0267?w=800", "description": "", "rating": null, "reviews": [], "metro_walk_miles": 0.2, "metro_walk_mins": 4, "metro_drive_miles": 0.6, "metro_drive_mins": 2, "drive_miles": 2.8, "drive_mins": 12, "transit_distance": null, "transit_time": null, "parking_est": 250, "pros": ["Near top of budget", "Short 4 min walk to metro"], "cons": ["Near top of budget"], "google_rating": 4.6, "google_count": 540, "google_url": "https://maps.google.com"}, {"source": "Apartments.com", "name": "Quiet garden 1BR in Andersonville", "price": 1650, "price_note": "Contact for price", "beds": 1, "sqft": 620, "address": "N Clark St, Andersonville", "coords": [41.977, -87.668], "url": "https://example.com/3", "image": "https://images.unsplash.com/photo-1493809842364-78817add7ffb?w=800", "description": "", "rating": null, "reviews": [], "metro_walk_miles": 0.7, "metro_walk_mins": 14, "metro_drive_miles": 1.4, "metro_drive_mins": 5, "drive_miles": 8.0, "drive_mins": 28, "transit_distance": null, "transit_time": null, "parking_est": 150, "pros": ["Well under budget"], "cons": ["Long 14 min walk to metro"]}, {"source": "HotPads", "name": "Renovated 2BR/2BA in Wicker Park", "price": 2390, "price_note": "Contact for price", "beds": 2, "sqft": 1010, "address": "N Damen Ave, Wicker Park", "coords": [41.909, -87.677], "url": "https://example.com/4", "image": "https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?w=800", "description": "", "rating": null, "reviews": [], "metro_walk_miles": 0.5, "metro_walk_mins": 9, "metro_drive_miles": 1.0, "metro_drive_mins": 4, "drive_miles": 4.9, "drive_mins": 18, "transit_distance": null, "transit_time": null, "parking_est": 200, "pros": ["Spacious at 1010 sqft"], "cons": [], "google_rating": 4.1, "google_count": 97, "google_url": "https://maps.google.com"}, {"source": "Craigslist", "name": "Cozy studio steps from the lakefront", "price": 1295, "price_note": "Contact for price", "beds": 0, "sqft": 480, "address": "N Sheridan Rd, Edgewater", "coords": [41.984, -87.655], "url": "https://example.com/5", "image": "", "description": "", "rating": null, "reviews": [], "metro_walk_miles": 0.6, "metro_walk_mins": 11, "metro_drive_miles": null, "metro_drive_mins": null, "drive_miles": 9.2, "drive_mins": 31, "transit_distance": null, "transit_time": null, "parking_est": 150, "pros": ["Well under budget"], "cons": ["Small at 480 sqft", "Posted on Craigslist \u2013 verify legitimacy"]}, {"source": "Zillow", "name": "Bright 3BR family flat in Logan Square", "price": 2475, "price_note": "Contact for price", "beds": 3, "sqft": 1240, "address": "W Logan Blvd, Logan Square", "coords": [41.928, -87.707], "url": "https://example.com/6", "image": "https://images.unsplash.com/photo-1484154218962-a197022b5858?w=800", "description": "", "rating": null, "reviews": [], "metro_walk_miles": 0.45, "metro_walk_mins": 8, "metro_drive_miles": 0.8, "metro_drive_mins": 3, "drive_miles": 6.7, "drive_mins": 24, "transit_distance": null, "transit_time": null, "parking_est": 200, "pros": ["Spacious at 1240 sqft", "Short 8 min walk to metro"], "cons": ["Near top of budget"], "google_rating": 4.3, "google_count": 156, "google_url": "https://maps.google.com", "yelp_rating": 3.8, "yelp_count": 42, "yelp_url": "https://yelp.com"}];
+let filtered = [...DATA];
+
+function stars(rating, max=5) {
+  if (!rating) return '';
+  const full = Math.round(rating);
+  return '★'.repeat(full) + '☆'.repeat(max - full);
+}
+
+function updatePrice(v) {
+  document.getElementById('priceVal').textContent = '$' + Number(v).toLocaleString();
+}
+
+function filterCards() {
+  const q   = document.getElementById('searchInput').value.toLowerCase();
+  const maxP = +document.getElementById('priceFilter').value;
+  const beds = [...document.querySelectorAll('#bedsFilter input:checked')].map(x=>x.value);
+  const srcs = [...document.querySelectorAll('.src-tag.on')].map(x=>x.dataset.s);
+
+  filtered = DATA.filter(a => {
+    if (q && !((a.name||'').toLowerCase().includes(q)) && !((a.address||'').toLowerCase().includes(q))) return false;
+    if (a.price && a.price > maxP) return false;
+    if (beds.length) {
+      const b = a.beds == null ? null : (a.beds >= 3 ? '3' : String(a.beds));
+      if (b !== null && !beds.includes(b)) return false;
+    }
+    if (srcs.length && !srcs.includes(a.source)) return false;
+    return true;
+  });
+  renderCards();
+}
+
+function sortCards(by) {
+  filtered.sort((a,b) => {
+    if (by==='price')    return (a.price||99999)-(b.price||99999);
+    if (by==='price_desc') return (b.price||0)-(a.price||0);
+    if (by==='metro')    return (a.metro_walk_mins||999)-(b.metro_walk_mins||999);
+    if (by==='commute')  return (a.drive_mins||999)-(b.drive_mins||999);
+    if (by==='rating')   return (b.google_rating||0)-(a.google_rating||0);
+    return 0;
+  });
+  renderCards();
+}
+
+function setView(v, btn) {
+  const g = document.getElementById('cardsGrid');
+  g.className = v==='list' ? 'grid list' : 'grid';
+  document.querySelectorAll('.v-btn').forEach(b=>b.classList.remove('on'));
+  btn.classList.add('on');
+}
+
+function renderCards() {
+  const grid = document.getElementById('cardsGrid');
+  document.getElementById('countBadge').textContent = filtered.length;
+  document.getElementById('toolbarLabel').textContent = filtered.length + ' listing' + (filtered.length!==1?'s':'');
+
+  if (!filtered.length) {
+    grid.innerHTML = '<div class="empty"><strong>No listings match your filters</strong><p>Try adjusting the price or bedroom filters.</p></div>';
+    renderStats([]);
+    return;
+  }
+  grid.innerHTML = filtered.map((a,i)=>cardHTML(a,i)).join('');
+  renderStats(filtered);
+}
+
+function revBadges(a) {
+  const g = a.google_rating
+    ? `<span class="rev-badge google">
+         <span class="brand">Google</span>
+         <span class="stars">${stars(a.google_rating)}</span>
+         <span class="score">${a.google_rating}</span>
+         ${a.google_count ? `<span class="ct">(${a.google_count.toLocaleString()})</span>` : ''}
+       </span>` : '';
+  const y = a.yelp_rating
+    ? `<span class="rev-badge yelp">
+         <span class="brand">Yelp</span>
+         <span class="stars">${stars(a.yelp_rating)}</span>
+         <span class="score">${a.yelp_rating}</span>
+         ${a.yelp_count ? `<span class="ct">(${a.yelp_count.toLocaleString()})</span>` : ''}
+       </span>` : '';
+  if (!g && !y) return '';
+  return `<div class="card-reviews">${g}${g && y ? '<span class="rev-sep">·</span>' : ''}${y}</div>`;
+}
+
+function cardHTML(a, idx) {
+  const hasImg = !!a.image;
+  const photo = hasImg
+    ? `<img src="${a.image}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+    : '';
+  const photoNone = `<div class="card-photo-none" style="${hasImg?'display:none':'display:flex'}">No photo</div>`;
+
+  const beds = a.beds != null ? (a.beds===0?'Studio':a.beds+' bed') : null;
+  const chips = [beds, a.sqft?a.sqft.toLocaleString()+' sqft':null].filter(Boolean)
+    .map(c=>`<span class="chip">${c}</span>`).join('');
+
+  const metroWalk  = a.metro_walk_mins  != null ? `<div class="dist-row"><span class="dist-label">Metro walk</span><span class="dist-val">${a.metro_walk_mins} min&thinsp;·&thinsp;${a.metro_walk_miles} mi</span></div>` : '';
+  const metroDrive = a.metro_drive_mins != null ? `<div class="dist-row"><span class="dist-label">Metro drive</span><span class="dist-val">${a.metro_drive_mins} min&thinsp;·&thinsp;${a.metro_drive_miles} mi</span></div>` : '';
+  const drive      = a.drive_mins       != null ? `<div class="dist-row"><span class="dist-label">Work drive</span><span class="dist-val">${a.drive_mins} min&thinsp;·&thinsp;${a.drive_miles} mi</span></div>` : '';
+
+  return `<div class="card" onclick="openModal(${idx})">
+    <div class="card-photo">${photo}${photoNone}<span class="card-source">${a.source}</span></div>
+    <div class="card-body">
+      <div class="card-name">${a.name||'Unnamed Listing'}</div>
+      <div class="card-addr">${a.address||'—'}</div>
+      <div class="card-price">
+        ${a.price ? '$'+a.price.toLocaleString() : ''}
+        ${a.price ? '<span class="mo">/mo</span>' : `<span class="contact">${a.price_note||'Contact for price'}</span>`}
+      </div>
+      ${chips ? `<div class="card-chips">${chips}</div>` : ''}
+      ${revBadges(a)}
+      ${(metroWalk||metroDrive||drive) ? `<div class="card-dist">${metroWalk}${metroDrive}${drive}</div>` : ''}
+    </div>
+    <div class="card-link">
+      ${a.url ? `<a href="${a.url}" target="_blank" onclick="event.stopPropagation()">View listing</a>` : '<span></span>'}
+      <span style="font-size:.7rem;color:var(--text3)">${a.source}</span>
+    </div>
+  </div>`;
+}
+
+function renderStats(apts) {
+  const prices = apts.map(a=>a.price).filter(p=>p>0);
+  const lo  = prices.length ? Math.min(...prices) : null;
+  const hi  = prices.length ? Math.max(...prices) : null;
+
+  const s = (n, l) => `<div class="stat"><div class="stat-n">${n}</div><div class="stat-l">${l}</div></div>`;
+  document.getElementById('statsBar').innerHTML = [
+    s(apts.length, 'Listings'),
+    lo ? s('$'+lo.toLocaleString(), 'Lowest')  : '',
+    hi ? s('$'+hi.toLocaleString(), 'Highest') : '',
+  ].join('');
+}
+
+function openModal(idx) {
+  const a = filtered[idx];
+  const photo = a.image
+    ? `<img class="m-photo" src="${a.image}" alt="" onerror="this.outerHTML='<div class=m-photo-none>No photo available</div>'">`
+    : '<div class="m-photo-none">No photo available</div>';
+
+  const parking   = a.parking_est ? `~$${a.parking_est}/mo` : '—';
+  const total     = (a.price||0) + (a.parking_est||0);
+  const transit   = a.transit_time ? `${a.transit_distance} · ${a.transit_time}` : (a.drive_mins ? `~${a.drive_mins} min drive` : '—');
+  const prosHTML  = (a.pros||[]).length ? (a.pros||[]).map(p=>`<li>${p}</li>`).join('') : '<li style="color:var(--text3)">None noted</li>';
+  const consHTML  = (a.cons||[]).length ? (a.cons||[]).map(c=>`<li>${c}</li>`).join('') : '<li style="color:var(--text3)">None noted</li>';
+
+  const gRev = a.google_rating
+    ? `<a class="m-rev-row" href="${a.google_url||'#'}" target="_blank" rel="noopener">
+         <span class="brand">Google</span>
+         <span class="stars g-stars">${stars(a.google_rating)}</span>
+         <span class="score">${a.google_rating}</span>
+         ${a.google_count ? `<span class="ct">(${a.google_count.toLocaleString()} reviews)</span>` : ''}
+       </a>` : '';
+  const yRev = a.yelp_rating
+    ? `<a class="m-rev-row" href="${a.yelp_url||'#'}" target="_blank" rel="noopener">
+         <span class="brand">Yelp</span>
+         <span class="stars y-stars">${stars(a.yelp_rating)}</span>
+         <span class="score">${a.yelp_rating}</span>
+         ${a.yelp_count ? `<span class="ct">(${a.yelp_count.toLocaleString()} reviews)</span>` : ''}
+       </a>` : '';
+
+  document.getElementById('modalContent').innerHTML = `
+    ${photo}
+    <div class="m-body">
+      <div class="m-source">${a.source}</div>
+      <div class="m-name">${a.name||'Unnamed Listing'}</div>
+      <div class="m-addr">${a.address||'—'}</div>
+      <div class="m-top">
+        <div class="m-price">
+          ${a.price ? '$'+a.price.toLocaleString()+'<span class="mo"> /mo</span>' : (a.price_note||'—')}
+        </div>
+        ${(gRev||yRev) ? `<div class="m-reviews-block">${gRev}${yRev}</div>` : ''}
+      </div>
+
+      <div class="m-sec">
+        <div class="m-sec-title">Details</div>
+        <div class="m-grid">
+          <div class="m-cell"><div class="lbl">Bedrooms</div><div class="val">${a.beds!=null?(a.beds===0?'Studio':a.beds+' bed'):'—'}</div></div>
+          <div class="m-cell"><div class="lbl">Size</div><div class="val">${a.sqft?a.sqft.toLocaleString()+' sqft':'—'}</div></div>
+          <div class="m-cell"><div class="lbl">Parking est.</div><div class="val">${a.parking_est?'~$'+a.parking_est+'/mo':'—'}</div></div>
+          <div class="m-cell"><div class="lbl">Source</div><div class="val">${a.source}</div></div>
+        </div>
+      </div>
+
+      <div class="m-sec">
+        <div class="m-sec-title">Monthly costs</div>
+        <div class="cost-rows">
+          <div class="cost-row"><span>Rent</span><span>${a.price?'$'+a.price.toLocaleString():'—'}</span></div>
+          <div class="cost-row"><span>Est. parking</span><span>${parking}</span></div>
+          <div class="cost-row"><span>Estimated total</span><span>${total?'$'+total.toLocaleString():'—'}</span></div>
+        </div>
+      </div>
+
+      <div class="m-sec">
+        <div class="m-sec-title">Getting around</div>
+        <div class="m-grid">
+          <div class="m-cell"><div class="lbl">Metro — walk</div><div class="val">${a.metro_walk_mins!=null?a.metro_walk_mins+' min · '+a.metro_walk_miles+' mi':'—'}</div></div>
+          <div class="m-cell"><div class="lbl">Metro — drive</div><div class="val">${a.metro_drive_mins!=null?a.metro_drive_mins+' min · '+a.metro_drive_miles+' mi':'—'}</div></div>
+          <div class="m-cell"><div class="lbl">Work — drive</div><div class="val">${a.drive_miles?a.drive_miles+' mi · '+a.drive_mins+' min':'—'}</div></div>
+          <div class="m-cell"><div class="lbl">Work — transit</div><div class="val">${transit}</div></div>
+        </div>
+      </div>
+
+      <div class="m-sec">
+        <div class="m-sec-title">Pros & cons</div>
+        <div class="pc-grid">
+          <div class="pc-col pros"><h4>Pros</h4><ul>${prosHTML}</ul></div>
+          <div class="pc-col cons"><h4>Cons</h4><ul>${consHTML}</ul></div>
+        </div>
+      </div>
+
+      ${a.url ? `<a href="${a.url}" target="_blank" class="m-link">View full listing</a>` : ''}
+    </div>`;
+  document.getElementById('overlay').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeModal(e) {
+  if (e && e.target!==document.getElementById('overlay') && !e.target.closest('.m-close')) return;
+  document.getElementById('overlay').classList.remove('open');
+  document.body.style.overflow='';
+}
+document.addEventListener('keydown', e => e.key==='Escape' && closeModal());
+
+function toggleTheme() {
+  const h = document.documentElement;
+  h.dataset.theme = h.dataset.theme==='dark' ? 'light' : 'dark';
+}
+
+function initPills() {
+  const sources = [...new Set(DATA.map(a=>a.source))];
+  document.getElementById('sourcePills').innerHTML = sources.map(s=>
+    `<span class="src-tag on" data-s="${s}" onclick="this.classList.toggle('on');filterCards()">${s}</span>`
+  ).join('');
+}
+
+initPills();
+filterCards();
+</script>
+</body>
+</html>

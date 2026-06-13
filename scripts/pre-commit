@@ -16,6 +16,7 @@ staged=$(git diff --cached --name-only --diff-filter=ACM)
 while IFS= read -r f; do
   case "$f" in
     config.local.json)        fail "config.local.json is private (your home base/commute). It is gitignored — don't force-add it." ;;
+    docs/sample.html)         : ;;  # curated showcase with neutral demo data — allowed
     apartments_*.html|*.html) fail "generated report '$f' contains scraped listings + your commute. Don't commit reports." ;;
     .env|*.key)               fail "'$f' looks like a secret file." ;;
   esac
