@@ -1209,15 +1209,26 @@ def _extract_listing_from_html(html, url, source):
     desc = desc or og("og:description")
     text = soup.get_text(" ", strip=True)
     if not price:
+        # Prefer a price with an explicit monthly suffix (most precise)…
         m = re.search(r"\$\s?([\d,]{3,5})\s*(?:/\s*mo|/\s*month|per month|monthly|\+|\s*month)", text, re.I)
         if m:
             price = _apartments_price(m.group(1))
+    if not price:
+        # …else take the smallest plausible monthly rent on the page (operator floorplan cards
+        # render "$1,789" with no suffix; $700–$20k filters out fees/deposits and phone digits).
+        cands = [int(x.replace(",", "")) for x in re.findall(r"\$\s?([\d]{1,2},\d{3})\b", text)]
+        cands = [v for v in cands if 700 <= v <= 20000]
+        if cands:
+            price = min(cands)
     if beds is not None:
         bm = re.search(r"\d+", str(beds))
         beds = int(bm.group()) if bm else None
     else:
-        m = re.search(r"(\d+)\s*(?:bed|bedroom|br|bd)\b", text, re.I)
-        beds = int(m.group(1)) if m else None
+        nums = [int(x) for x in re.findall(r"(\d+)\s*(?:bed|bedroom|br|bd)\b", text, re.I) if int(x) <= 6]
+        if nums:
+            beds = min(nums)
+        elif re.search(r"\bstudio\b", text, re.I):
+            beds = 0
     if not name:
         return None
     return _blank_listing(
@@ -1225,53 +1236,130 @@ def _extract_listing_from_html(html, url, source):
         address=address or "", url=url, image=image or "",
         images=[image] if image else [], description=(desc or "")[:500])
 
-def scrape_generic_site(entry, driver, criteria):
-    """Try a complex's own website (A); if it yields nothing, try its structured fallback
-    listing page (B). Returns one listing dict or None."""
-    for u in [u for u in (entry.get("url"), entry.get("fallback")) if u]:
-        html = None
-        try:
-            r = SESSION.get(u, timeout=12)
-            if r.status_code < 400 and len(r.text) > 500:
-                html = r.text
-        except Exception:
-            html = None
-        if not html and driver is not None:           # browser fallback for JS/anti-bot sites
+def _finalize_site(entry, listing, max_price):
+    """Apply the complex's known name and the budget cap to an extracted listing."""
+    if entry.get("name"):
+        listing["name"] = entry["name"]
+    if max_price and listing["price"] and listing["price"] > max_price:
+        return None                                    # over budget — drop the lead
+    return listing
+
+async def _render_pages(urls, concurrency=3):
+    """Render JS-heavy pages in real Edge (Playwright) and return {url: html}. Big operators
+    (Equity, AvalonBay, Greystar/RentCafe, Bozzuto, etc.) load floorplan pricing via JS and ship
+    nothing scrapeable in raw HTML; a real browser that also passes PerimeterX (the same channel
+    trick as Zillow) renders the prices into the DOM so _extract_listing_from_html can read them."""
+    from playwright.async_api import async_playwright
+    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+    out = {}
+    async with async_playwright() as p:
+        browser = None
+        for channel in ("msedge", "chrome", None):
             try:
-                driver.get(u)
-                time.sleep(random.uniform(2, 3))
-                html = driver.page_source
+                kw = {"headless": False,
+                      "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"]}
+                if channel:
+                    kw["channel"] = channel
+                browser = await p.chromium.launch(**kw)
+                break
             except Exception:
-                html = None
-        if not html:
-            continue
+                continue
+        if browser is None:
+            return out
         try:
-            listing = _extract_listing_from_html(html, u, "Local site")
-        except Exception:
-            listing = None
-        if listing and (listing["price"] or listing["beds"] or listing["address"]):
-            if entry.get("name"):
-                listing["name"] = entry["name"]
-            mp = int(criteria["max_price"]) if criteria.get("max_price") else None
-            if mp and listing["price"] and listing["price"] > mp:
-                return None                            # over budget — drop the lead
-            return listing
-    return None
+            ctx = await browser.new_context(user_agent=ua, locale="en-US",
+                                            viewport={"width": 1366, "height": 900})
+            await ctx.add_init_script(
+                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
+            sem = asyncio.Semaphore(concurrency)
+
+            async def one(u):
+                async with sem:
+                    page = await ctx.new_page()
+                    try:
+                        await page.goto(u, wait_until="domcontentloaded", timeout=30000)
+                        await asyncio.sleep(random.uniform(3, 5))      # let JS hydrate pricing
+                        await page.mouse.wheel(0, random.randint(600, 1200))
+                        await asyncio.sleep(random.uniform(1.5, 2.5))
+                        return u, await page.content()
+                    except Exception:
+                        return u, None
+                    finally:
+                        try:
+                            await page.close()
+                        except Exception:
+                            pass
+
+            for fut in asyncio.as_completed([one(u) for u in urls]):
+                try:
+                    u, h = await fut
+                    if h:
+                        out[u] = h
+                except Exception:
+                    pass
+        finally:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+    return out
 
 def scrape_local_sites(criteria, driver, max_results=10):
-    """Scrape the ~10 local complexes the skill found (each tried A then B)."""
+    """Scrape the ~10 local complexes the skill found, each tried A (own site) then B (structured
+    fallback). Two passes: a fast `requests` pass, then a real-Edge render pass for the JS-heavy
+    sites (most big operators) that requests can't read. A usable result needs a price or beds —
+    address-only hits are dropped as noise."""
     entries = criteria.get("sites") or []
     if not entries:
         return []
     print(f"  Searching local apartment sites ({len(entries)})...")
-    results = []
+    mp = int(criteria["max_price"]) if criteria.get("max_price") else None
+    results, pending = [], []
+
+    def usable(l):
+        return l and (l["price"] or l["beds"])
+
+    # ── Pass 1: requests (catches sites that ship structured data in raw HTML) ──
     for e in entries[:max_results]:
+        urls = [u for u in (e.get("url"), e.get("fallback")) if u]
+        hit = None
+        for u in urls:
+            try:
+                r = SESSION.get(u, timeout=12)
+                if r.status_code < 400 and len(r.text) > 500:
+                    l = _extract_listing_from_html(r.text, u, "Local site")
+                    if usable(l):
+                        hit = _finalize_site(e, l, mp); break
+            except Exception:
+                continue
+        if hit:
+            results.append(hit)
+        elif urls:
+            pending.append((e, urls))
+
+    # ── Pass 2: render the misses in real Edge, then extract from the rendered DOM ──
+    if pending:
+        rendered = {}
         try:
-            r = scrape_generic_site(e, driver, criteria)
-            if r:
-                results.append(r)
+            rendered = asyncio.run(_render_pages([u for _, urls in pending for u in urls]))
         except Exception:
-            continue
+            rendered = {}
+        for e, urls in pending:
+            for u in urls:
+                h = rendered.get(u)
+                if not h:
+                    continue
+                try:
+                    l = _extract_listing_from_html(h, u, "Local site")
+                except Exception:
+                    l = None
+                if usable(l):
+                    fin = _finalize_site(e, l, mp)
+                    if fin:
+                        results.append(fin); break
+
+    results = [r for r in results if r]
     print(f"  Found {len(results)} local-site listings.")
     return results
 
