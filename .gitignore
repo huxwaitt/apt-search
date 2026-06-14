@@ -6,6 +6,12 @@ apartments_*.html
 *.html
 # ...except the curated design showcase (neutral demo data)
 !docs/sample.html
+# ...and the bookmarklet install pages (part of the tool, no private data)
+!zillow-bookmarklet.html
+!apartments-bookmarklet.html
+
+# per-run output folders (reports, copied dumps, run.json with your criteria/commute)
+data/
 
 # ── Secrets ──
 .env

@@ -5,7 +5,7 @@ Multi-platform apartment search with interactive HTML report generation.
 Searches Zillow, Apartments.com, Craigslist, and more.
 """
 
-import sys, json, time, random, re, os, argparse, urllib.parse, webbrowser, math
+import sys, json, time, random, re, os, argparse, urllib.parse, webbrowser, math, asyncio, shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -33,6 +33,7 @@ _ensure([
     ("requests", "requests"),
     ("beautifulsoup4", "bs4"),
     ("selenium", "selenium"),
+    ("playwright", "playwright"),  # drives real Edge/Chrome to get past Zillow's PerimeterX
 ])
 
 import requests
@@ -62,6 +63,35 @@ HEADERS = {
 }
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
+
+# ── Project paths / per-run output folder ─────────────────────────────────────
+def project_dir():
+    """Directory this script lives in — the project root. Works on macOS and Windows."""
+    return Path(__file__).resolve().parent
+
+def _slug(text):
+    return re.sub(r"[^a-z0-9._-]+", "-", str(text).lower()).strip("-")
+
+def make_run_dir(criteria):
+    """Create and return `<project>/data/<yyyy.mm.dd>_<run info>/` for this run.
+
+    The folder name encodes the search (location, beds, max price) so each run is
+    self-describing. Uses pathlib throughout, so it behaves the same on macOS and Windows;
+    a time suffix is added only if a same-named folder already exists that day."""
+    date = datetime.now().strftime("%Y.%m.%d")
+    parts = [criteria.get("location") or "search", criteria.get("state") or ""]
+    beds = criteria.get("bedrooms")
+    if beds is not None:
+        parts.append("studio" if beds == 0 else f"{beds}bd")
+    if criteria.get("max_price"):
+        parts.append(f"max{criteria['max_price']}")
+    info = _slug("-".join(str(p) for p in parts if p)) or "search"
+    base = project_dir() / "data" / f"{date}_{info}"
+    d = base
+    if d.exists():
+        d = base.with_name(f"{base.name}_{datetime.now().strftime('%H%M%S')}")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 # ── User Input ────────────────────────────────────────────────────────────────
 def ask(prompt, required=False, cast=None, default=None):
@@ -116,8 +146,7 @@ def parse_args():
     p.add_argument("--metro-station", default=D["metro_station"])
     p.add_argument("--work-address", default=D["work_address"])
     p.add_argument("--gmaps-key", default=None)
-    p.add_argument("--reviews", action="store_true",
-                   help="Scrape Google/Yelp reviews (slow, often rate-limited)")
+    # Google + Yelp review lookups always run — not a flag (intentionally always on).
     p.add_argument("--skip-link-check", action="store_true",
                    help="Skip validating that each listing URL actually resolves")
     p.add_argument("--browser", choices=["auto", "chrome", "edge", "firefox"], default="auto",
@@ -130,6 +159,20 @@ def parse_args():
     p.add_argument("--attach-port", type=int, default=None,
                    help="Port to attach to with --attach (default 9222 for Chrome, "
                         "2828 for Firefox's Marionette)")
+    p.add_argument("--zillow-json", nargs="?", const="auto", default=None,
+                   help="Path to a zillow_listings.json produced by the bookmarklet "
+                        "(see zillow-bookmarklet.html). Pass with no value (or 'auto') to "
+                        "auto-pick the newest zillow_listings*.json in Downloads. This is "
+                        "the primary manual fallback when the auto Edge path is challenged.")
+    p.add_argument("--apartments-json", nargs="?", const="auto", default=None,
+                   help="Path to an apartments_listings.json produced by the bookmarklet "
+                        "(see apartments-bookmarklet.html). Pass with no value (or 'auto') to "
+                        "auto-pick the newest apartments_listings*.json in Downloads. "
+                        "Apartments.com 403s automated scrapers, so this is the way to include it.")
+    p.add_argument("--zillow-html", default=None,
+                   help="Path to a Zillow rentals page you saved from your own browser "
+                        "(Ctrl+S → 'Web Page, HTML only'). Listings are read from it with "
+                        "no automation/attach — a deeper fallback if the bookmarklet won't run.")
     p.add_argument("--headless", action="store_true",
                    help="Run the browser headless (no visible window)")
     p.add_argument("--no-open", action="store_true",
@@ -169,12 +212,15 @@ def get_criteria(args):
 
     c["radius"]        = args.radius
     c["size_flexible"] = True
-    c["reviews"]       = args.reviews
+    c["reviews"]       = True   # Google + Yelp reviews always run (not configurable)
     c["check_links"]   = not args.skip_link_check
     c["headless"]      = args.headless
     c["browser"]       = args.browser
     c["attach"]        = args.attach
     c["attach_port"]   = args.attach_port
+    c["zillow_json"]   = args.zillow_json
+    c["apartments_json"] = args.apartments_json
+    c["zillow_html"]   = args.zillow_html
     c["max_listings"]  = args.max_listings
     print()
     return c
@@ -350,6 +396,12 @@ def scrape_craigslist(criteria, driver, max_results=40):
         print("  Craigslist skipped (no browser available).")
         return results
     try:
+        # A maximized (non-occluded) window keeps Chrome from throttling the page's
+        # image loading — important when the run is in the background.
+        try:
+            driver.maximize_window()
+        except Exception:
+            pass
         driver.get(url)
         # Wait for the JS-rendered result cards to appear
         try:
@@ -359,6 +411,20 @@ def scrape_craigslist(criteria, driver, max_results=40):
         except Exception:
             pass
         time.sleep(2.5)
+        # Craigslist lazy-loads gallery thumbnails only as a card enters the viewport,
+        # and a backgrounded window won't eager-load them — so parsing immediately leaves
+        # most cards with a data-URI placeholder instead of a real photo. Bring each card
+        # into view with scrollIntoView (which fires the intersection observer reliably
+        # even when occluded), then let the images settle before parsing.
+        try:
+            card_els = driver.find_elements(By.CSS_SELECTOR, ".cl-search-result")[:max_results]
+            for el in card_els:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                time.sleep(0.12)
+            time.sleep(2)
+            driver.execute_script("window.scrollTo(0, 0);")
+        except Exception:
+            pass
         soup = BeautifulSoup(driver.page_source, "html.parser")
 
         # Build a title→coords map from JSON-LD
@@ -407,8 +473,16 @@ def scrape_craigslist(criteria, driver, max_results=40):
                     locality = m.group(1).strip() if m else ""
                 address = locality or f"{criteria['location']}, {criteria['state']}"
 
-                img_el = card.select_one("img")
-                img = img_el.get("src", "") if img_el else ""
+                # Take a real loaded thumbnail; ignore data-URI lazy-load placeholders
+                # (a missing image is better than a broken placeholder in the report).
+                img = ""
+                for ie in card.select("img"):
+                    src = ie.get("src", "")
+                    if "images.craigslist.org" in src:
+                        img = src
+                        break
+                    if src and not src.startswith("data:") and not img:
+                        img = src
 
                 # Filter out listings outside the requested price band (CL sometimes leaks a few)
                 if price and criteria.get("max_price") and price > criteria["max_price"]:
@@ -480,6 +554,313 @@ def await_listings(driver, selector, label, headless, timeout=240):
     print(f"\n  {label}: timed out waiting for listings.                     ")
     return False
 
+# ── Zillow Scraper (undetected-chromedriver, no watch window) ─────────────────
+def _find_chrome_binary():
+    """Locate a Chrome binary: a real install, else the Chrome-for-Testing that
+    Selenium Manager already downloaded for this project. Returns (path, version_main)."""
+    import glob
+    candidates = [
+        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c, None
+    cache = os.path.join(os.path.expanduser("~"), ".cache", "selenium", "chrome", "**", "chrome.exe")
+    found = sorted(glob.glob(cache, recursive=True))
+    if found:
+        path = found[-1]                       # newest version dir
+        m = re.search(r"[\\/](\d+)\.\d+\.\d+", path)
+        return path, (int(m.group(1)) if m else None)
+    return None, None
+
+def _zillow_price(text):
+    if not text:
+        return 0
+    m = re.search(r"[\d,]+", text)
+    return int(m.group(0).replace(",", "")) if m else 0
+
+def _zillow_extract_listings(raw):
+    """Pull the listResults array out of a __NEXT_DATA__ JSON string."""
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None
+    bucket = {}
+    def _walk(o):
+        if isinstance(o, dict):
+            if isinstance(o.get("listResults"), list):
+                bucket.setdefault("lr", o["listResults"])
+            for v in o.values():
+                _walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                _walk(v)
+    _walk(data)
+    return bucket.get("lr")
+
+async def _zillow_fetch(url):
+    """Load a Zillow page in a real browser and return its __NEXT_DATA__ text.
+
+    Key detail: we drive the *installed consumer browser* (Edge, then Chrome) via
+    Playwright's `channel=`, not a bundled/testing Chromium. Zillow's PerimeterX
+    fingerprints the automation-flavored binaries (plain Selenium, Chrome-for-Testing,
+    undetected-chromedriver) and challenges them, but a genuine Edge/Chrome build on a
+    residential IP passes — so no 'Press & Hold' ever appears.
+    """
+    from playwright.async_api import async_playwright
+    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+    hdrs = {"Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+    args = ["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+    async with async_playwright() as p:
+        browser = None
+        for channel in ("msedge", "chrome", None):     # prefer real consumer browsers
+            try:
+                kw = {"headless": False, "args": args}
+                if channel:
+                    kw["channel"] = channel
+                browser = await p.chromium.launch(**kw)
+                break
+            except Exception:
+                continue
+        if browser is None:
+            return None
+        try:
+            ctx = await browser.new_context(user_agent=ua, viewport={"width": 1366, "height": 768},
+                                            locale="en-US", extra_http_headers=hdrs)
+            await ctx.add_init_script(
+                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
+            page = await ctx.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(random.uniform(2.5, 4))
+            await page.mouse.wheel(0, random.randint(400, 900))
+            await asyncio.sleep(random.uniform(1.5, 2.5))
+            return await page.evaluate(
+                "()=>{const e=document.getElementById('__NEXT_DATA__');return e?e.textContent:null;}")
+        finally:
+            await browser.close()
+
+def _zillow_url(criteria):
+    """Build the clean slug rentals URL (e.g. .../falls-church-va/rentals/).
+    This form is far less likely to be challenged than /homes/for_rent/<encoded>/."""
+    slug = f"{criteria['location']} {criteria['state']}".strip().lower()
+    slug = re.sub(r"[,\s]+", "-", slug)
+    slug = re.sub(r"[^a-z0-9\-]", "", slug).strip("-")
+    return f"https://www.zillow.com/{slug}/rentals/"
+
+def _zillow_photos(it, limit=15):
+    """Expand a listing's carouselPhotosComposable into full photo URLs.
+
+    Zillow ships one cover photo as imgSrc but the whole gallery as photoKeys under
+    carouselPhotosComposable.photoData, each formed by substituting {photoKey} into baseUrl
+    (e.g. https://photos.zillowstatic.com/fp/{photoKey}-p_e.jpg). Falls back to [imgSrc]."""
+    cp = it.get("carouselPhotosComposable") or {}
+    base = cp.get("baseUrl")
+    keys = [p.get("photoKey") for p in (cp.get("photoData") or []) if p.get("photoKey")]
+    urls = []
+    if base and "{photoKey}" in base:
+        urls = [base.replace("{photoKey}", k) for k in keys[:limit]]
+    img = it.get("imgSrc", "")
+    if not urls:
+        return [img] if img else []
+    if img and img not in urls:                # keep the chosen cover photo first
+        urls = [img] + [u for u in urls if u != img]
+    return urls[:limit]
+
+def _zillow_build_results(items, criteria, max_results):
+    """Turn Zillow listResults into our listing dicts, expanding building unit
+    ranges into one entry per bedroom type that matches the price/beds filters."""
+    results = []
+    want_beds = criteria.get("bedrooms")
+    want_beds = int(want_beds) if want_beds is not None else -1
+    max_price = int(criteria["max_price"]) if criteria.get("max_price") else None
+    min_price = int(criteria.get("min_price") or 0)
+    for it in items:
+            try:
+                addr = it.get("address") or it.get("buildingName") or ""
+                link = it.get("detailUrl") or ""
+                if link and not link.startswith("http"):
+                    link = "https://www.zillow.com" + link
+                img = it.get("imgSrc", "")
+                photos = _zillow_photos(it)
+                name = it.get("buildingName") or it.get("statusText") or addr
+                # Build (beds, price) candidates from the unit list or top-level price.
+                cands = []
+                for u in (it.get("units") or []):
+                    cands.append((u.get("beds"), _zillow_price(u.get("price"))))
+                if not cands:
+                    cands.append((it.get("beds"), _zillow_price(it.get("price")) or
+                                  int(it.get("minBaseRent") or 0)))
+                seen_beds = set()
+                for beds_raw, price in sorted(cands, key=lambda c: c[1] or 0):
+                    try:
+                        beds = int(beds_raw) if beds_raw not in (None, "") else None
+                    except (ValueError, TypeError):
+                        beds = None
+                    if not price:
+                        continue
+                    if max_price and price > max_price:
+                        continue
+                    if min_price and price < min_price:
+                        continue
+                    if want_beds >= 0 and beds is not None and beds != want_beds:
+                        continue
+                    if beds in seen_beds:           # one entry per bedroom type per building
+                        continue
+                    seen_beds.add(beds)
+                    bed_label = "Studio" if beds == 0 else (f"{beds}-bd" if beds else "")
+                    results.append({
+                        "source": "Zillow",
+                        "name": f"{name} · {bed_label}".strip(" ·") if bed_label else name,
+                        "price": price,
+                        "beds": beds,
+                        "sqft": None,
+                        "address": addr,
+                        "url": link,
+                        "image": img,
+                        "images": photos,
+                        "description": it.get("statusText", ""),
+                        "rating": None,
+                        "reviews": [],
+                        "metro_walk_miles": None,
+                        "metro_walk_mins": None,
+                        "drive_miles": None,
+                        "drive_mins": None,
+                        "transit_distance": None,
+                        "transit_time": None,
+                        "parking_est": None,
+                        "pros": [],
+                        "cons": [],
+                    })
+                    if len(results) >= max_results:
+                        break
+                if len(results) >= max_results:
+                    break
+            except Exception:
+                continue
+    return results
+
+def scrape_zillow_api(criteria, max_results=20):
+    """Scrape Zillow rentals via Playwright + the installed consumer browser (Edge/Chrome).
+    No human interaction — reads listings from the page's embedded __NEXT_DATA__ JSON."""
+    print(f"  Searching Zillow...")
+    results = []
+    try:
+        url = _zillow_url(criteria)
+        items = None
+        for attempt in range(1, 3):
+            raw = asyncio.run(_zillow_fetch(url))
+            items = _zillow_extract_listings(raw) if raw else None
+            if items:
+                break
+            if attempt < 2:
+                print(f"  Zillow: no data (attempt {attempt}/2), retrying…")
+                time.sleep(random.uniform(3, 5))
+        if not items:
+            print(f"  Zillow: listings data not found; 0 listings.")
+            return results
+        results = _zillow_build_results(items, criteria, max_results)
+    except Exception as e:
+        print(f"  Zillow error: {str(e).splitlines()[0]}")
+    print(f"  Found {len(results)} Zillow listings.")
+    return results
+
+def _newest_zillow_dump():
+    """Return the path to the most recent zillow_listings*.json in Downloads, or None."""
+    import glob
+    dl = os.path.join(os.path.expanduser("~"), "Downloads")
+    cands = glob.glob(os.path.join(dl, "zillow_listings*.json"))
+    return max(cands, key=os.path.getmtime) if cands else None
+
+def scrape_zillow_from_json(criteria, path, max_results=20):
+    """Parse listings from a bookmarklet JSON dump (see zillow-bookmarklet.html).
+
+    The bookmarklet runs in the user's own, already-cleared browser and downloads the bare
+    `listResults` array — no automation touches the page, so PerimeterX never challenges it.
+    We feed the array straight to _zillow_build_results (no __NEXT_DATA__ unwrapping needed)."""
+    print("  Searching Zillow (from bookmarklet dump)...")
+    results = []
+    try:
+        if path in (None, "auto"):
+            path = _newest_zillow_dump()
+        if not path or not os.path.isfile(path):
+            print("  Zillow: no bookmarklet dump found in Downloads; 0 listings.")
+            return results
+        age_min = (time.time() - os.path.getmtime(path)) / 60
+        if age_min > 30:
+            print(f"  Zillow: warning - dump is {age_min:.0f} min old "
+                  f"({os.path.basename(path)}); may be a stale/other search.")
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            items = json.load(fh)
+        if not isinstance(items, list) or not items:
+            print("  Zillow: bookmarklet dump is empty; 0 listings.")
+            return results
+        results = _zillow_build_results(items, criteria, max_results)
+    except Exception as e:
+        print(f"  Zillow error: {str(e).splitlines()[0]}")
+    print(f"  Found {len(results)} Zillow listings.")
+    return results
+
+def scrape_zillow_from_file(criteria, path, max_results=20):
+    """Parse Zillow listings from a page the user saved from their OWN browser.
+
+    The whole Marionette/attach dance is avoided: the user opens the Zillow
+    rentals page in their normal Firefox (which isn't challenged), hits Ctrl+S,
+    and we read the embedded __NEXT_DATA__ JSON out of the saved .html file.
+    Zero automation touches their browser."""
+    print(f"  Searching Zillow (from saved page)...")
+    results = []
+    try:
+        if not os.path.isfile(path):
+            print(f"  Zillow: saved file not found at {path}; 0 listings.")
+            return results
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            html = fh.read()
+        m = re.search(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
+        items = _zillow_extract_listings(m.group(1)) if m else None
+        if not items:
+            print(f"  Zillow: no listings found in saved page "
+                  f"(save the rentals results page as 'Web Page, HTML only'); 0 listings.")
+            return results
+        results = _zillow_build_results(items, criteria, max_results)
+    except Exception as e:
+        print(f"  Zillow error: {str(e).splitlines()[0]}")
+    print(f"  Found {len(results)} Zillow listings.")
+    return results
+
+def scrape_zillow_via_driver(criteria, driver, max_results=20):
+    """Scrape Zillow through an already-attached Selenium browser — e.g. a real
+    Firefox the user launched with -marionette and cleared. We reuse their live,
+    un-challenged session, navigate to the rentals page, and read __NEXT_DATA__
+    from the rendered source. No Press & Hold, because it's their real browser."""
+    print(f"  Searching Zillow (via your attached browser)...")
+    results = []
+    try:
+        url = _zillow_url(criteria)
+        driver.get(url)
+        time.sleep(random.uniform(4, 6))
+        for _ in range(3):
+            try:
+                driver.execute_script("window.scrollBy(0, document.body.scrollHeight/3);")
+            except Exception:
+                break
+            time.sleep(1)
+        m = re.search(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+                      driver.page_source, re.S)
+        items = _zillow_extract_listings(m.group(1)) if m else None
+        if not items:
+            print(f"  Zillow: no listings in the attached session "
+                  f"(is the rentals page loaded & cleared?); 0 listings.")
+            return results
+        results = _zillow_build_results(items, criteria, max_results)
+    except Exception as e:
+        print(f"  Zillow error: {str(e).splitlines()[0]}")
+    print(f"  Found {len(results)} Zillow listings.")
+    return results
+
 # ── Zillow Scraper (Selenium) ─────────────────────────────────────────────────
 def scrape_zillow(criteria, driver, max_results=20):
     location = urllib.parse.quote_plus(f"{criteria['location']}, {criteria['state']}")
@@ -550,6 +931,127 @@ def scrape_zillow(criteria, driver, max_results=20):
     return results
 
 # ── Apartments.com Scraper (Selenium) ─────────────────────────────────────────
+def _apartments_price(text):
+    if not text:
+        return 0
+    m = re.search(r"[\d,]+", text)
+    return int(m.group(0).replace(",", "")) if m else 0
+
+def _apartments_beds(text):
+    if not text:
+        return None
+    if re.search(r"studio", text, re.I):
+        return 0
+    m = re.search(r"(\d+)", text)
+    return int(m.group(1)) if m else None
+
+def _apartments_build_results(items, criteria, max_results):
+    """Turn bookmarklet placard objects into listing dicts, expanding each placard's
+    per-bedroom rentRollup boxes into one entry per bed type that matches the filters
+    (mirrors _zillow_build_results)."""
+    results = []
+    want_beds = criteria.get("bedrooms")
+    want_beds = int(want_beds) if want_beds is not None else -1
+    max_price = int(criteria["max_price"]) if criteria.get("max_price") else None
+    min_price = int(criteria.get("min_price") or 0)
+    for it in items:
+        try:
+            link = it.get("url") or ""
+            if link and not link.startswith("http"):
+                link = "https://www.apartments.com" + link
+            title = it.get("title") or it.get("address") or "Apartments.com Listing"
+            img = it.get("image", "")
+            amenities = it.get("amenities") or []
+            # (beds, price) candidates from the rentRollup boxes; fall back to a regex over
+            # the placard's info text if the structured boxes are absent.
+            cands = []
+            for u in (it.get("units") or []):
+                cands.append((_apartments_beds(u.get("bedText")),
+                              _apartments_price(u.get("priceText"))))
+            if not cands:
+                blob = it.get("infoText", "")
+                cands.append((_apartments_beds(blob), _apartments_price(blob)))
+            seen_beds = set()
+            for beds, price in sorted(cands, key=lambda c: c[1] or 0):
+                if not price:
+                    continue
+                if max_price and price > max_price:
+                    continue
+                if min_price and price < min_price:
+                    continue
+                if want_beds >= 0 and beds is not None and beds != want_beds:
+                    continue
+                if beds in seen_beds:
+                    continue
+                seen_beds.add(beds)
+                bed_label = "Studio" if beds == 0 else (f"{beds}-bd" if beds else "")
+                results.append({
+                    "source": "Apartments.com",
+                    "name": f"{title} · {bed_label}".strip(" ·") if bed_label else title,
+                    "price": price,
+                    "beds": beds,
+                    "sqft": None,
+                    "address": it.get("address", ""),
+                    "url": link,
+                    "image": img,
+                    "images": [img] if img else [],
+                    "description": ", ".join(amenities),
+                    "rating": None,
+                    "reviews": [],
+                    "metro_walk_miles": None,
+                    "metro_walk_mins": None,
+                    "drive_miles": None,
+                    "drive_mins": None,
+                    "transit_distance": None,
+                    "transit_time": None,
+                    "parking_est": None,
+                    "pros": [],
+                    "cons": [],
+                })
+                if len(results) >= max_results:
+                    break
+            if len(results) >= max_results:
+                break
+        except Exception:
+            continue
+    return results
+
+def _newest_apartments_dump():
+    """Return the most recent apartments_listings*.json in Downloads, or None."""
+    import glob
+    dl = os.path.join(os.path.expanduser("~"), "Downloads")
+    cands = glob.glob(os.path.join(dl, "apartments_listings*.json"))
+    return max(cands, key=os.path.getmtime) if cands else None
+
+def scrape_apartments_from_json(criteria, path, max_results=20):
+    """Parse listings from an Apartments.com bookmarklet dump (see apartments-bookmarklet.html).
+
+    Apartments.com 403s automated scrapers, so the user clicks a bookmarklet on a results page
+    in their own browser; it normalizes each placard (id/url/title/address/photo/rentRollup
+    boxes/amenities) and downloads apartments_listings.json. No automation touches the page."""
+    print("  Searching Apartments.com (from bookmarklet dump)...")
+    results = []
+    try:
+        if path in (None, "auto"):
+            path = _newest_apartments_dump()
+        if not path or not os.path.isfile(path):
+            print("  Apartments.com: no bookmarklet dump found in Downloads; 0 listings.")
+            return results
+        age_min = (time.time() - os.path.getmtime(path)) / 60
+        if age_min > 30:
+            print(f"  Apartments.com: warning - dump is {age_min:.0f} min old "
+                  f"({os.path.basename(path)}); may be a stale/other search.")
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            items = json.load(fh)
+        if not isinstance(items, list) or not items:
+            print("  Apartments.com: bookmarklet dump is empty; 0 listings.")
+            return results
+        results = _apartments_build_results(items, criteria, max_results)
+    except Exception as e:
+        print(f"  Apartments.com error: {str(e).splitlines()[0]}")
+    print(f"  Found {len(results)} Apartments.com listings.")
+    return results
+
 def scrape_apartments_com(criteria, driver, max_results=20):
     loc = re.sub(r"\s+", "-", f"{criteria['location']}-{criteria['state']}").lower()
     loc = re.sub(r"[^a-z0-9\-]", "", loc)
@@ -562,7 +1064,7 @@ def scrape_apartments_com(criteria, driver, max_results=20):
         driver.get(url)
         time.sleep(random.uniform(2, 3))
         if not await_listings(driver, "article.placard, .placard",
-                              "Apartments.com", criteria.get("headless", False)):
+                              "Apartments.com", criteria.get("headless", False), timeout=25):
             print(f"  Found 0 Apartments.com listings.")
             return results
         soup = BeautifulSoup(driver.page_source, "html.parser")
@@ -624,7 +1126,7 @@ def scrape_hotpads(criteria, driver, max_results=15):
         driver.get(url)
         time.sleep(random.uniform(2, 3))
         if not await_listings(driver, "li[data-test='listing-card']",
-                              "HotPads", criteria.get("headless", False)):
+                              "HotPads", criteria.get("headless", False), timeout=25):
             print(f"  Found 0 HotPads listings.")
             return results
         soup = BeautifulSoup(driver.page_source, "html.parser")
@@ -679,6 +1181,16 @@ def _apply_common_opts(opts, headless):
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--no-sandbox")
+    # Keep rendering/loading active even when the window is occluded or in the
+    # background — otherwise Chrome throttles paint and Craigslist's lazy-loaded
+    # gallery thumbnails never fetch, leaving most listings imageless.
+    opts.add_argument("--disable-backgrounding-occluded-windows")
+    opts.add_argument("--disable-renderer-backgrounding")
+    opts.add_argument("--disable-background-timer-throttling")
+    # On Windows, Chrome detects a covered window as "occluded" and stops rendering
+    # it, which halts Craigslist's intersection-observer thumbnail loading. Disabling
+    # native occlusion calculation makes a background window behave like a visible one.
+    opts.add_argument("--disable-features=CalculateNativeWinOcclusion")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
     opts.add_argument(f"user-agent={HEADERS['User-Agent']}")
@@ -890,6 +1402,10 @@ def validate_link(url):
         r = SESSION.head(url, allow_redirects=True, timeout=8)
         if r.status_code == 405 or r.status_code >= 400:
             r = SESSION.get(url, allow_redirects=True, timeout=10, stream=True)
+        # 403/429 from an anti-bot wall (e.g. Zillow's PerimeterX) means the page
+        # exists but blocks our checker — not a dead listing. Don't penalize it.
+        if r.status_code in (403, 429):
+            return True
         return r.status_code < 400
     except Exception:
         return False
@@ -1090,8 +1606,129 @@ def scrape_reviews(name, address, city):
         "yelp_url":      yelp_url_found,
     }
 
+def fetch_craigslist_images(url, max_imgs=8):
+    """Craigslist listing detail pages are plain HTML (no bot wall) and embed every
+    photo. Pull the gallery image URLs so the report can show more than one picture."""
+    if not url or "craigslist.org" not in url:
+        return []
+    try:
+        r = SESSION.get(url, timeout=10)
+        if r.status_code != 200:
+            return []
+        urls = re.findall(r'https://images\.craigslist\.org/[0-9A-Za-z_]+_[0-9]+x[0-9]+\.jpg', r.text)
+        seen, out = set(), []
+        for u in urls:
+            base = u.rsplit("_", 1)[0]   # dedupe the same image across size variants
+            if base in seen:
+                continue
+            seen.add(base)
+            out.append(u)
+            if len(out) >= max_imgs:
+                break
+        return out
+    except Exception:
+        return []
+
+async def _fetch_google_ratings(queries):
+    """Look up Google Maps star ratings for named properties in ONE Edge session.
+    queries: list of (key, query_string). Returns {key: (rating, count_or_None)}.
+    Uses the real installed browser (same trick as Zillow) since Google search no
+    longer ships ratings in scrapeable HTML, but Maps renders them in aria-labels."""
+    from playwright.async_api import async_playwright
+    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+    out = {}
+    async with async_playwright() as p:
+        browser = None
+        for channel in ("msedge", "chrome", None):
+            try:
+                kw = {"headless": False, "args": ["--no-sandbox"]}
+                if channel:
+                    kw["channel"] = channel
+                browser = await p.chromium.launch(**kw)
+                break
+            except Exception:
+                continue
+        if browser is None:
+            return out
+        try:
+            ctx = await browser.new_context(user_agent=ua, locale="en-US")
+            page = await ctx.new_page()
+            for key, q in queries:
+                try:
+                    page_url = "https://www.google.com/maps/search/" + urllib.parse.quote(q)
+                    await page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
+                    await asyncio.sleep(random.uniform(3.5, 5))
+                    labels = await page.eval_on_selector_all(
+                        "[role='feed'] [role='img'][aria-label*='star'], "
+                        "[role='main'] [role='img'][aria-label*='star'], "
+                        "span[aria-label*='stars']",
+                        "els=>els.map(e=>e.getAttribute('aria-label'))")
+                    rating = count = None
+                    for L in (labels or []):           # prefer a label with both rating + count
+                        m = re.search(r'([0-5]\.\d)\s*stars?\s*([\d,]+)?\s*[Rr]eview', L or '')
+                        if m:
+                            rating = float(m.group(1))
+                            count = int((m.group(2) or "0").replace(",", "")) or None
+                            break
+                    if rating is None:
+                        for L in (labels or []):
+                            m = re.search(r'([0-5]\.\d)\s*stars?', L or '')
+                            if m:
+                                rating = float(m.group(1))
+                                break
+                    if rating is not None:
+                        out[key] = (rating, count)
+                except Exception:
+                    continue
+        finally:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+    return out
+
+def _property_name_for_reviews(apt):
+    """Return a real property/building name worth a Google rating lookup, else None.
+    Only named complexes get reviews — a generic Craigslist title would match a random
+    nearby place and show a bogus rating, so those are skipped."""
+    if apt.get("source") == "Zillow":
+        nm = (apt.get("name") or "").split(" · ")[0].strip()
+        return nm or None
+    # Craigslist private rentals have no review page; skip unless clearly a named complex.
+    return None
+
+def _enrich_reviews(apts, criteria):
+    """Batch-fetch Google ratings for named properties (deduped) and attach them."""
+    city = f"{criteria['location']}, {criteria['state']}"
+    by_name = {}
+    for i, apt in enumerate(apts):
+        nm = _property_name_for_reviews(apt)
+        if nm:
+            by_name.setdefault(nm, []).append(i)
+    if not by_name:
+        return
+    print(f"  Looking up Google ratings for {len(by_name)} named properties...")
+    queries = [(nm, f"{nm} {city}") for nm in by_name]
+    try:
+        results = asyncio.run(_fetch_google_ratings(queries))
+    except Exception:
+        results = {}
+    for nm, idxs in by_name.items():
+        url = ("https://www.google.com/maps/search/?api=1&query="
+               + urllib.parse.quote_plus(f"{nm} {city}"))
+        rc = results.get(nm)
+        for i in idxs:
+            apts[i]["google_url"] = url
+            if rc:
+                apts[i]["google_rating"] = rc[0]
+                apts[i]["google_count"] = rc[1]
+
 def enrich_apartments(apts, criteria, metro_coords, work_coords):
     print(f"\nEnriching {len(apts)} listings with distance data and reviews...")
+    # Batch Google + Yelp ratings up front (named properties only) so pros/cons can use them.
+    # Always runs by design — there is no opt-out flag.
+    _enrich_reviews(apts, criteria)
     for i, apt in enumerate(apts):
         label = apt["name"][:48]
         print(f"  [{i+1}/{len(apts)}] {label}...", end="\r")
@@ -1145,9 +1782,16 @@ def enrich_apartments(apts, criteria, metro_coords, work_coords):
         apt["pets_dogs"], apt["pets_cats"] = detect_pets(pet_blob)
         apt["parking_free"], apt["parking_price"] = detect_parking(pet_blob)
 
-        # Reviews (Google + Yelp) — opt-in; slow and frequently rate-limited
-        if criteria.get("reviews"):
-            apt.update(scrape_reviews(apt["name"], apt["address"], criteria["location"]))
+        # Multiple photos: Craigslist detail pages carry the full gallery; pull them so
+        # the report can show more than one picture. (Ratings handled in batch above.)
+        if apt.get("source") == "Craigslist" and apt.get("url"):
+            imgs = fetch_craigslist_images(apt["url"])
+            if imgs:
+                apt["images"] = imgs
+                if not apt.get("image"):
+                    apt["image"] = imgs[0]
+        if not apt.get("images"):
+            apt["images"] = [apt["image"]] if apt.get("image") else []
 
         # Pros/cons
         apt["pros"], apt["cons"] = infer_pros_cons(apt, criteria, metro_coords)
@@ -1356,6 +2000,11 @@ input[type=range] {{ width: 100%; accent-color: var(--accent); height: 1px; curs
 .m-close {{ position: absolute; top: 1.1rem; right: 1.1rem; width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--border2); background: var(--raised); color: var(--text2); cursor: pointer; z-index: 5; display: flex; align-items: center; justify-content: center; font-size: .8rem; transition: all .2s; }}
 .m-close:hover {{ background: var(--accent); color: var(--bg); border-color: var(--accent); }}
 .m-photo {{ width: 100%; height: 240px; object-fit: cover; display: block; filter: grayscale(.35); }}
+.m-gallery {{ display: flex; overflow-x: auto; scroll-snap-type: x mandatory; gap: 4px; scrollbar-width: thin; }}
+.m-gallery .m-photo {{ flex: 0 0 100%; scroll-snap-align: center; }}
+.m-gallery::-webkit-scrollbar {{ height: 7px; }}
+.m-gallery::-webkit-scrollbar-thumb {{ background: var(--border); border-radius: 4px; }}
+.m-count {{ font-size: .72rem; color: var(--text3); padding: .25rem 0 0; }}
 .m-photo-none {{ width: 100%; height: 120px; background: var(--border); display: flex; align-items: center; justify-content: center; color: var(--text3); font-family: var(--serif); font-style: italic; font-size: .82rem; }}
 .m-body {{ padding: 2rem 2.25rem 2.25rem; }}
 .m-source {{ font-size: .62rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); margin-bottom: .6rem; }}
@@ -1642,8 +2291,10 @@ function renderStats(apts) {{
 
 function openModal(idx) {{
   const a = filtered[idx];
-  const photo = a.image
-    ? `<img class="m-photo" src="${{a.image}}" alt="" onerror="this.outerHTML='<div class=m-photo-none>No photo available</div>'">`
+  const imgs = (a.images && a.images.length) ? a.images : (a.image ? [a.image] : []);
+  const photo = imgs.length
+    ? `<div class="m-gallery">${{imgs.map(u=>`<img class="m-photo" src="${{u}}" alt="" loading="lazy" onerror="this.remove()">`).join('')}}</div>`
+      + (imgs.length>1 ? `<div class="m-count">${{imgs.length}} photos · swipe →</div>` : '')
     : '<div class="m-photo-none">No photo available</div>';
 
   // Parking: prefer what the listing actually states (free / a real price), else fall
@@ -1783,8 +2434,30 @@ def generate_html(apartments, criteria):
         beds_line=beds_line,
         data_json=json.dumps(apartments, default=str),
     )
-    out = Path.home() / "Downloads" / f"apartments_{criteria['location'].replace(' ','_').lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    # Each run gets its own folder under <project>/data/ (cross-platform).
+    rd = make_run_dir(criteria)
+    out = rd / f"apartments_{_slug(criteria['location'])}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
     out.write_text(html, encoding="utf-8")
+
+    # Archive the run's inputs/metadata alongside the report so the folder is self-contained:
+    # the bookmarklet dumps that fed it (if any) and a small run.json.
+    try:
+        for resolver, used in ((_newest_zillow_dump, criteria.get("zillow_json")),
+                               (_newest_apartments_dump, criteria.get("apartments_json"))):
+            if used:
+                src = resolver()
+                if src and os.path.isfile(src):
+                    shutil.copy2(src, rd / os.path.basename(src))
+        (rd / "run.json").write_text(json.dumps({
+            "generated": datetime.now().isoformat(timespec="seconds"),
+            "criteria": {k: criteria.get(k) for k in
+                         ("location", "state", "bedrooms", "min_price", "max_price",
+                          "radius", "metro_station", "work_address")},
+            "listing_count": len(apartments),
+            "sources": sorted({a.get("source") for a in apartments if a.get("source")}),
+        }, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"  (run-folder archive warning: {str(e).splitlines()[0]})")
     return out
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1823,9 +2496,20 @@ def main():
     if driver is not None:
         try:
             apartments += scrape_craigslist(criteria, driver, max_results=max_n)
-            apartments += scrape_zillow(criteria, driver)
-            apartments += scrape_apartments_com(criteria, driver)
-            apartments += scrape_hotpads(criteria, driver)
+            if criteria.get("zillow_json"):
+                apartments += scrape_zillow_from_json(criteria, criteria["zillow_json"])
+            elif criteria.get("zillow_html"):
+                apartments += scrape_zillow_from_file(criteria, criteria["zillow_html"])
+            elif criteria.get("attach"):
+                apartments += scrape_zillow_via_driver(criteria, driver)
+            else:
+                apartments += scrape_zillow_api(criteria)
+            if criteria.get("apartments_json"):
+                apartments += scrape_apartments_from_json(criteria, criteria["apartments_json"])
+            else:
+                apartments += scrape_apartments_com(criteria, driver)
+            # HotPads removed: it's Zillow-owned (inventory overlaps the Zillow bookmarklet)
+            # and reliably throws its own Press & Hold check, wasting ~25s for 0 results.
         except Exception as e:
             print(f"  Browser search error: {e}")
         finally:

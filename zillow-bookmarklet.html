@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apartment Search — Zillow grabber bookmarklet</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.55 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         max-width: 760px; margin: 40px auto; padding: 0 20px; }
+  h1 { font-size: 1.5rem; margin-bottom: .2em; }
+  .sub { color: #666; margin-top: 0; }
+  ol { padding-left: 1.2em; }
+  li { margin: .6em 0; }
+  .bm { display: inline-block; padding: 10px 16px; margin: 4px 0;
+        background: #1277e1; color: #fff; text-decoration: none; border-radius: 8px;
+        font-weight: 600; cursor: grab; }
+  .bm:active { cursor: grabbing; }
+  textarea { width: 100%; height: 120px; font: 12px/1.4 ui-monospace, Consolas, monospace;
+             margin-top: 8px; padding: 8px; box-sizing: border-box; border-radius: 6px; }
+  code { background: rgba(127,127,127,.18); padding: 1px 5px; border-radius: 4px; }
+  .note { background: rgba(127,127,127,.10); border-left: 3px solid #1277e1;
+          padding: 10px 14px; border-radius: 4px; margin: 18px 0; }
+  button { padding: 6px 12px; border-radius: 6px; border: 1px solid #888;
+           background: transparent; cursor: pointer; font: inherit; }
+</style>
+</head>
+<body>
+  <h1>Grab Zillow listings → <code>zillow_listings.json</code></h1>
+  <p class="sub">One-time setup for the apartment-search skill's Zillow fallback. No automation
+  touches your browser, so Zillow's "Press &amp; Hold" check never trips.</p>
+
+  <h2>Setup (once)</h2>
+  <ol>
+    <li>Make sure your <strong>bookmarks bar</strong> is visible
+        (<code>Ctrl+Shift+B</code> in Chrome/Edge).</li>
+    <li><strong>Drag this button</strong> up onto your bookmarks bar:<br>
+        <a class="bm" id="bm" href="#">📋 Grab Zillow listings</a></li>
+  </ol>
+  <div class="note">Can't drag it? Create a new bookmark manually, name it
+    <em>Grab Zillow listings</em>, and paste the code below as its <strong>URL</strong>:
+    <textarea id="raw" readonly onclick="this.select()"></textarea>
+    <button onclick="navigator.clipboard.writeText(document.getElementById('raw').value)">
+      Copy code</button>
+  </div>
+
+  <h2>Each time you search</h2>
+  <ol>
+    <li>Open the rentals page for your city, e.g.
+        <code>https://www.zillow.com/falls-church-va/rentals/</code>.
+        Clear any "Press &amp; Hold" check so listings show.</li>
+    <li>Click the <strong>Grab Zillow listings</strong> bookmark. An alert shows the count and
+        <code>zillow_listings.json</code> downloads to your Downloads folder.</li>
+    <li>Tell Claude it's ready — the search picks up the newest dump automatically
+        (<code>--zillow-json</code>).</li>
+  </ol>
+
+<script>
+// Single source of truth for the bookmarklet body. Assigned to the link href and the copy box
+// at runtime so we avoid HTML-attribute encoding pitfalls with &&, <, > inside the code.
+var CODE = "javascript:(function(){" +
+  "var found=[];" +
+  "var walk=function(o){if(!o||typeof o!=='object')return;" +
+    "if(Array.isArray(o.listResults))found.push.apply(found,o.listResults);" +
+    "for(var k in o){try{walk(o[k])}catch(e){}}};" +
+  "var nd=document.getElementById('__NEXT_DATA__');" +
+  "if(nd){try{walk(JSON.parse(nd.textContent))}catch(e){}}" +
+  "if(!found.length){var ss=document.scripts;for(var i=0;i<ss.length;i++){var s=ss[i];" +
+    "if(s.textContent&&s.textContent.indexOf('listResults')>-1){" +
+    "var m=s.textContent.match(/\\{[\\s\\S]*\\}/);" +
+    "if(m){try{walk(JSON.parse(m[0]))}catch(e){}}}}}" +
+  "var blob=new Blob([JSON.stringify(found,null,2)],{type:'application/json'});" +
+  "var a=document.createElement('a');a.href=URL.createObjectURL(blob);" +
+  "a.download='zillow_listings.json';document.body.appendChild(a);a.click();a.remove();" +
+  "alert('Grabbed '+found.length+' listings -> Downloads/zillow_listings.json');})();";
+document.getElementById('bm').href = CODE;
+document.getElementById('raw').value = CODE;
+</script>
+</body>
+</html>

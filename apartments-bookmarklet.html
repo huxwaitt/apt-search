@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apartment Search — Apartments.com grabber bookmarklet</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.55 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         max-width: 760px; margin: 40px auto; padding: 0 20px; }
+  h1 { font-size: 1.5rem; margin-bottom: .2em; }
+  .sub { color: #666; margin-top: 0; }
+  ol { padding-left: 1.2em; }
+  li { margin: .6em 0; }
+  .bm { display: inline-block; padding: 10px 16px; margin: 4px 0;
+        background: #0a8a5f; color: #fff; text-decoration: none; border-radius: 8px;
+        font-weight: 600; cursor: grab; }
+  .bm:active { cursor: grabbing; }
+  textarea { width: 100%; height: 120px; font: 12px/1.4 ui-monospace, Consolas, monospace;
+             margin-top: 8px; padding: 8px; box-sizing: border-box; border-radius: 6px; }
+  code { background: rgba(127,127,127,.18); padding: 1px 5px; border-radius: 4px; }
+  .note { background: rgba(127,127,127,.10); border-left: 3px solid #0a8a5f;
+          padding: 10px 14px; border-radius: 4px; margin: 18px 0; }
+  button { padding: 6px 12px; border-radius: 6px; border: 1px solid #888;
+           background: transparent; cursor: pointer; font: inherit; }
+</style>
+</head>
+<body>
+  <h1>Grab Apartments.com listings → <code>apartments_listings.json</code></h1>
+  <p class="sub">One-time setup for the apartment-search skill's Apartments.com source.
+  Apartments.com 403s automated scrapers, so the listings have to come from your own browser —
+  this bookmarklet reads the results page you're looking at. No automation touches it.</p>
+
+  <h2>Setup (once)</h2>
+  <ol>
+    <li>Make sure your <strong>bookmarks bar</strong> is visible
+        (<code>Ctrl+Shift+B</code> in Chrome/Edge, <code>Cmd+Shift+B</code> on Mac).</li>
+    <li><strong>Drag this button</strong> up onto your bookmarks bar:<br>
+        <a class="bm" id="bm" href="#">🏢 Grab Apartments.com</a></li>
+  </ol>
+  <div class="note">Can't drag it? Create a new bookmark manually, name it
+    <em>Grab Apartments.com</em>, and paste the code below as its <strong>URL</strong>:
+    <textarea id="raw" readonly onclick="this.select()"></textarea>
+    <button onclick="navigator.clipboard.writeText(document.getElementById('raw').value)">
+      Copy code</button>
+  </div>
+
+  <h2>Each time you search</h2>
+  <ol>
+    <li>Open an Apartments.com search for your city/filters, e.g.
+        <code>https://www.apartments.com/falls-church-va/2-bedrooms-under-2500/</code>.
+        Clear any check, and scroll down once so photos load.</li>
+    <li>Click the <strong>Grab Apartments.com</strong> bookmark. An alert shows the count and
+        <code>apartments_listings.json</code> downloads to your Downloads folder.</li>
+    <li>Tell Claude it's ready — the search picks up the newest dump automatically
+        (<code>--apartments-json</code>).</li>
+  </ol>
+
+<script>
+// Single source of truth for the bookmarklet body. Assigned to the link href and the copy box
+// at runtime so we avoid HTML-attribute encoding pitfalls with &&, <, > inside the code.
+var CODE = "javascript:(function(){" +
+  "var T=function(el,sel){var n=el.querySelector(sel);return n?(n.textContent||'').trim():'';};" +
+  "var cards=document.querySelectorAll('article.placard, .placard[data-listingid]');var out=[];" +
+  "for(var i=0;i<cards.length;i++){var el=cards[i];var units=[];" +
+    "var boxes=el.querySelectorAll('.rentRollup .bedRentBox');" +
+    "for(var j=0;j<boxes.length;j++){units.push({bedText:T(boxes[j],'.bedTextBox')," +
+      "priceText:T(boxes[j],'.priceTextBox')});}" +
+    "var img=el.querySelector('.carousel-item img')||el.querySelector('img');var ams=[];" +
+    "var aEls=el.querySelectorAll('.property-amenities span');" +
+    "for(var k=0;k<aEls.length;k++){ams.push((aEls[k].textContent||'').trim());}" +
+    "var url=el.getAttribute('data-url')||'';" +
+    "if(!url){var lk=el.querySelector('a.property-link');if(lk)url=lk.href;}" +
+    "out.push({source:'Apartments.com',id:el.getAttribute('data-listingid')||'',url:url," +
+      "title:T(el,'.js-placardTitle')||T(el,'.property-title'),address:T(el,'.property-address')," +
+      "image:img?(img.getAttribute('src')||img.getAttribute('data-src')||''):''," +
+      "units:units,amenities:ams,infoText:T(el,'.property-info')});}" +
+  "out=out.filter(function(x){return x.url;});" +
+  "var blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});" +
+  "var a=document.createElement('a');a.href=URL.createObjectURL(blob);" +
+  "a.download='apartments_listings.json';document.body.appendChild(a);a.click();a.remove();" +
+  "alert('Grabbed '+out.length+' listings -> Downloads/apartments_listings.json');})();";
+document.getElementById('bm').href = CODE;
+document.getElementById('raw').value = CODE;
+</script>
+</body>
+</html>
