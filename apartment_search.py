@@ -127,6 +127,7 @@ def parse_args():
         "radius":        10,
         "metro_station": None,
         "work_address":  None,
+        "yelp_key":      None,
     }
     cfg_path = Path(__file__).with_name("config.local.json")
     if cfg_path.exists():
@@ -146,6 +147,9 @@ def parse_args():
     p.add_argument("--metro-station", default=D["metro_station"])
     p.add_argument("--work-address", default=D["work_address"])
     p.add_argument("--gmaps-key", default=None)
+    p.add_argument("--yelp-key", default=D["yelp_key"],
+                   help="Yelp Fusion API key (free at yelp.com/developers). Required for Yelp "
+                        "ratings — Yelp blocks scraping. Can also live in config.local.json.")
     # Google + Yelp review lookups always run — not a flag (intentionally always on).
     p.add_argument("--skip-link-check", action="store_true",
                    help="Skip validating that each listing URL actually resolves")
@@ -169,6 +173,10 @@ def parse_args():
                         "(see apartments-bookmarklet.html). Pass with no value (or 'auto') to "
                         "auto-pick the newest apartments_listings*.json in Downloads. "
                         "Apartments.com 403s automated scrapers, so this is the way to include it.")
+    p.add_argument("--sites-file", default=None,
+                   help="Path to a JSON file the skill compiles of ~10 popular local apartment "
+                        "complexes ([{name,url,fallback}, ...]). Each is scraped best-effort: "
+                        "the complex's own site (A), falling back to its structured listing (B).")
     p.add_argument("--zillow-html", default=None,
                    help="Path to a Zillow rentals page you saved from your own browser "
                         "(Ctrl+S → 'Web Page, HTML only'). Listings are read from it with "
@@ -211,6 +219,7 @@ def get_criteria(args):
         c["gmaps_key"]     = args.gmaps_key
 
     c["radius"]        = args.radius
+    c["yelp_key"]      = args.yelp_key
     c["size_flexible"] = True
     c["reviews"]       = True   # Google + Yelp reviews always run (not configurable)
     c["check_links"]   = not args.skip_link_check
@@ -220,6 +229,7 @@ def get_criteria(args):
     c["attach_port"]   = args.attach_port
     c["zillow_json"]   = args.zillow_json
     c["apartments_json"] = args.apartments_json
+    c["sites"]         = _load_sites(args.sites_file)
     c["zillow_html"]   = args.zillow_html
     c["max_listings"]  = args.max_listings
     print()
@@ -363,6 +373,7 @@ def _blank_listing(**kw):
         "parking_est": None, "pros": [], "cons": [],
         "pets_dogs": None, "pets_cats": None,
         "parking_free": None, "parking_price": None,
+        "amenities": [],
     }
     base.update(kw)
     return base
@@ -996,6 +1007,7 @@ def _apartments_build_results(items, criteria, max_results):
                     "image": img,
                     "images": [img] if img else [],
                     "description": ", ".join(amenities),
+                    "amenities": amenities,
                     "rating": None,
                     "reviews": [],
                     "metro_walk_miles": None,
@@ -1114,6 +1126,153 @@ def scrape_apartments_com(criteria, driver, max_results=20):
     except Exception as e:
         print(f"  Apartments.com error: {e}")
     print(f"  Found {len(results)} Apartments.com listings.")
+    return results
+
+# ── Local apartment sites (generic best-effort scraper) ───────────────────────
+def _load_sites(path):
+    """Read the sites list the skill compiled (one complex per item). Accepts a JSON list of
+    {name,url,fallback} objects or bare URL strings, or a newline-delimited URL file."""
+    if not path or not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        try:
+            data = [l.strip() for l in open(path, encoding="utf-8") if l.strip()]
+        except Exception:
+            return []
+    out = []
+    for x in (data if isinstance(data, list) else []):
+        if isinstance(x, str):
+            out.append({"name": None, "url": x, "fallback": None})
+        elif isinstance(x, dict) and x.get("url"):
+            out.append({"name": x.get("name"), "url": x.get("url"),
+                        "fallback": x.get("fallback")})
+    return out
+
+def _jsonld_blocks(soup):
+    """Yield every JSON-LD object on the page, flattening @graph and nested objects."""
+    blocks = []
+    for s in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        try:
+            data = json.loads(s.string or s.get_text() or "")
+        except Exception:
+            continue
+        stack = [data]
+        while stack:
+            o = stack.pop()
+            if isinstance(o, dict):
+                blocks.append(o)
+                if isinstance(o.get("@graph"), list):
+                    stack.extend(o["@graph"])
+            elif isinstance(o, list):
+                stack.extend(o)
+    return blocks
+
+def _extract_listing_from_html(html, url, source):
+    """Best-effort single-listing extraction from an arbitrary apartment page:
+    schema.org JSON-LD first, then OpenGraph, then a price/beds regex over the text."""
+    soup = BeautifulSoup(html, "html.parser")
+    name = address = image = desc = None
+    price = 0
+    beds = None
+    for o in _jsonld_blocks(soup):
+        name = name or o.get("name")
+        a = o.get("address")
+        if isinstance(a, dict):
+            address = address or ", ".join(
+                [p for p in (a.get("streetAddress"), a.get("addressLocality"),
+                             a.get("addressRegion")) if p])
+        elif isinstance(a, str):
+            address = address or a
+        im = o.get("image")
+        if isinstance(im, list):
+            im = im[0] if im else None
+        if isinstance(im, dict):
+            im = im.get("url")
+        image = image or im
+        off = o.get("offers")
+        if isinstance(off, list):
+            off = off[0] if off else None
+        if isinstance(off, dict) and not price:
+            price = _apartments_price(str(off.get("price") or off.get("lowPrice") or ""))
+        beds = beds or o.get("numberOfBedrooms") or o.get("numberOfRooms")
+        desc = desc or o.get("description")
+
+    def og(prop):
+        m = soup.find("meta", attrs={"property": prop}) or soup.find("meta", attrs={"name": prop})
+        return m.get("content").strip() if m and m.get("content") else None
+
+    name = name or og("og:title") or (soup.title.get_text(strip=True) if soup.title else None)
+    image = image or og("og:image")
+    desc = desc or og("og:description")
+    text = soup.get_text(" ", strip=True)
+    if not price:
+        m = re.search(r"\$\s?([\d,]{3,5})\s*(?:/\s*mo|/\s*month|per month|monthly|\+|\s*month)", text, re.I)
+        if m:
+            price = _apartments_price(m.group(1))
+    if beds is not None:
+        bm = re.search(r"\d+", str(beds))
+        beds = int(bm.group()) if bm else None
+    else:
+        m = re.search(r"(\d+)\s*(?:bed|bedroom|br|bd)\b", text, re.I)
+        beds = int(m.group(1)) if m else None
+    if not name:
+        return None
+    return _blank_listing(
+        source=source, name=str(name).strip()[:120], price=price, beds=beds,
+        address=address or "", url=url, image=image or "",
+        images=[image] if image else [], description=(desc or "")[:500])
+
+def scrape_generic_site(entry, driver, criteria):
+    """Try a complex's own website (A); if it yields nothing, try its structured fallback
+    listing page (B). Returns one listing dict or None."""
+    for u in [u for u in (entry.get("url"), entry.get("fallback")) if u]:
+        html = None
+        try:
+            r = SESSION.get(u, timeout=12)
+            if r.status_code < 400 and len(r.text) > 500:
+                html = r.text
+        except Exception:
+            html = None
+        if not html and driver is not None:           # browser fallback for JS/anti-bot sites
+            try:
+                driver.get(u)
+                time.sleep(random.uniform(2, 3))
+                html = driver.page_source
+            except Exception:
+                html = None
+        if not html:
+            continue
+        try:
+            listing = _extract_listing_from_html(html, u, "Local site")
+        except Exception:
+            listing = None
+        if listing and (listing["price"] or listing["beds"] or listing["address"]):
+            if entry.get("name"):
+                listing["name"] = entry["name"]
+            mp = int(criteria["max_price"]) if criteria.get("max_price") else None
+            if mp and listing["price"] and listing["price"] > mp:
+                return None                            # over budget — drop the lead
+            return listing
+    return None
+
+def scrape_local_sites(criteria, driver, max_results=10):
+    """Scrape the ~10 local complexes the skill found (each tried A then B)."""
+    entries = criteria.get("sites") or []
+    if not entries:
+        return []
+    print(f"  Searching local apartment sites ({len(entries)})...")
+    results = []
+    for e in entries[:max_results]:
+        try:
+            r = scrape_generic_site(e, driver, criteria)
+            if r:
+                results.append(r)
+        except Exception:
+            continue
+    print(f"  Found {len(results)} local-site listings.")
     return results
 
 # ── HotPads Scraper ───────────────────────────────────────────────────────────
@@ -1451,6 +1610,36 @@ def detect_parking(text):
         price = int(m.group(1).replace(",", "")); free = False
     return free, price
 
+# Common amenities worth surfacing, mapped to the patterns that signal them. Display order =
+# list order. Run over the listing text plus any explicit amenity list so every source
+# normalizes to the same vocabulary (Apartments.com "In Unit Washer & Dryer" and a Craigslist
+# "w/d in unit" both become "In-unit W/D").
+_AMENITY_PATTERNS = [
+    ("In-unit W/D",          r"in[\s-]?unit\s+(washer|laundry|w/?d)|washer\s*(/|and|&|\+)?\s*dryer\s+in[\s-]?unit|w/?d\s+in[\s-]?unit|in[\s-]?suite laundry|washer\s*(&|and|/)\s*dryer"),
+    ("Laundry on-site",      r"laundry\s+(room|on[\s-]?site|facilit|center)|on[\s-]?site laundry|coin[\s-]?(op|laundry)|shared laundry"),
+    ("Dishwasher",           r"dishwasher"),
+    ("Air conditioning",     r"air[\s-]?condition|central air|central a/?c|\ba/?c\b|\bhvac\b"),
+    ("Fitness center",       r"fitness|\bgym\b|exercise room|workout"),
+    ("Pool",                 r"\bpool\b|swimming"),
+    ("Parking/Garage",       r"parking|garage|carport"),
+    ("Balcony/Patio",        r"balcon|patio|\bdeck\b|terrace"),
+    ("Hardwood floors",      r"hardwood|wood floor"),
+    ("Walk-in closet",       r"walk[\s-]?in closet"),
+    ("Stainless appliances", r"stainless"),
+    ("Elevator",             r"elevator"),
+    ("Doorman/Concierge",    r"doorman|concierge|front desk"),
+    ("Rooftop",              r"rooftop|roof deck"),
+    ("Pet friendly",         r"pet[\s-]?friendly|pets?\s+(ok|okay|welcome|allowed)|dog[\s-]?friendly|cat[\s-]?friendly"),
+    ("Furnished",            r"\bfurnished\b"),
+    ("EV charging",          r"\bev\b\s*charg|electric vehicle charg|ev[\s-]?charg"),
+]
+
+def detect_amenities(text):
+    """Return de-duplicated, normalized amenity labels found in the text, in a stable display
+    order. Source-agnostic — feed it the listing text plus any explicit amenity list."""
+    t = (text or "").lower()
+    return [label for label, pat in _AMENITY_PATTERNS if re.search(pat, t)]
+
 # ── Enrichment: Distance & Reviews ───────────────────────────────────────────
 def infer_pros_cons(apt, criteria, metro_coords):
     pros, cons = [], []
@@ -1629,11 +1818,63 @@ def fetch_craigslist_images(url, max_imgs=8):
     except Exception:
         return []
 
-async def _fetch_google_ratings(queries):
-    """Look up Google Maps star ratings for named properties in ONE Edge session.
-    queries: list of (key, query_string). Returns {key: (rating, count_or_None)}.
-    Uses the real installed browser (same trick as Zillow) since Google search no
-    longer ships ratings in scrapeable HTML, but Maps renders them in aria-labels."""
+async def _rating_google(page, name, city):
+    """Read a Google Maps rating + count for one property, or None."""
+    try:
+        q = f"{name} {city}"
+        await page.goto("https://www.google.com/maps/search/" + urllib.parse.quote(q),
+                        wait_until="domcontentloaded", timeout=30000)
+        await asyncio.sleep(random.uniform(3, 4.5))
+        labels = await page.eval_on_selector_all(
+            "[role='feed'] [role='img'][aria-label*='star'], "
+            "[role='main'] [role='img'][aria-label*='star'], "
+            "span[aria-label*='stars']",
+            "els=>els.map(e=>e.getAttribute('aria-label'))")
+        rating = count = None
+        for L in (labels or []):               # prefer a label with both rating + count
+            m = re.search(r'([0-5]\.\d)\s*stars?\s*([\d,]+)?\s*[Rr]eview', L or '')
+            if m:
+                rating = float(m.group(1))
+                count = int((m.group(2) or "0").replace(",", "")) or None
+                break
+        if rating is None:
+            for L in (labels or []):
+                m = re.search(r'([0-5]\.\d)\s*stars?', L or '')
+                if m:
+                    rating = float(m.group(1)); break
+        return (rating, count) if rating is not None else None
+    except Exception:
+        return None
+
+def _fetch_yelp_api(name, city, key):
+    """Yelp rating + count + url via the official Fusion API, or None. Yelp hard-blocks
+    scraping (serves an empty anti-bot shell to any browser), so the API key is the only
+    reliable path. Free tier at yelp.com/developers."""
+    if not key:
+        return None
+    try:
+        r = requests.get(
+            "https://api.yelp.com/v3/businesses/search",
+            headers={"Authorization": f"Bearer {key}"},
+            params={"term": name, "location": city, "limit": 1},
+            timeout=10)
+        if r.status_code != 200:
+            return None
+        bs = (r.json() or {}).get("businesses") or []
+        if not bs:
+            return None
+        b = bs[0]
+        if b.get("rating") is None:
+            return None
+        return (b.get("rating"), b.get("review_count"), b.get("url"))
+    except Exception:
+        return None
+
+async def _fetch_ratings(queries, concurrency=5):
+    """Look up Google Maps ratings + counts for named properties in ONE Edge session, running up
+    to `concurrency` properties in parallel (own tab each). queries: list of (key, name, city).
+    Returns {key: (rating, count)|None}. Uses the real installed browser (same trick as Zillow)
+    — Maps renders ratings in aria-labels but ships nothing scrapeable to plain requests."""
     from playwright.async_api import async_playwright
     ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -1653,34 +1894,25 @@ async def _fetch_google_ratings(queries):
             return out
         try:
             ctx = await browser.new_context(user_agent=ua, locale="en-US")
-            page = await ctx.new_page()
-            for key, q in queries:
+            sem = asyncio.Semaphore(concurrency)
+
+            async def one(key, name, city):
+                async with sem:                    # cap concurrent tabs to avoid rate-limiting
+                    page = await ctx.new_page()
+                    try:
+                        return key, await _rating_google(page, name, city)
+                    finally:
+                        try:
+                            await page.close()
+                        except Exception:
+                            pass
+
+            for fut in asyncio.as_completed([one(k, n, c) for k, n, c in queries]):
                 try:
-                    page_url = "https://www.google.com/maps/search/" + urllib.parse.quote(q)
-                    await page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
-                    await asyncio.sleep(random.uniform(3.5, 5))
-                    labels = await page.eval_on_selector_all(
-                        "[role='feed'] [role='img'][aria-label*='star'], "
-                        "[role='main'] [role='img'][aria-label*='star'], "
-                        "span[aria-label*='stars']",
-                        "els=>els.map(e=>e.getAttribute('aria-label'))")
-                    rating = count = None
-                    for L in (labels or []):           # prefer a label with both rating + count
-                        m = re.search(r'([0-5]\.\d)\s*stars?\s*([\d,]+)?\s*[Rr]eview', L or '')
-                        if m:
-                            rating = float(m.group(1))
-                            count = int((m.group(2) or "0").replace(",", "")) or None
-                            break
-                    if rating is None:
-                        for L in (labels or []):
-                            m = re.search(r'([0-5]\.\d)\s*stars?', L or '')
-                            if m:
-                                rating = float(m.group(1))
-                                break
-                    if rating is not None:
-                        out[key] = (rating, count)
+                    key, g = await fut
+                    out[key] = g
                 except Exception:
-                    continue
+                    pass
         finally:
             try:
                 await browser.close()
@@ -1689,17 +1921,37 @@ async def _fetch_google_ratings(queries):
     return out
 
 def _property_name_for_reviews(apt):
-    """Return a real property/building name worth a Google rating lookup, else None.
+    """Return a real property/building name worth a Google/Yelp rating lookup, else None.
     Only named complexes get reviews — a generic Craigslist title would match a random
     nearby place and show a bogus rating, so those are skipped."""
-    if apt.get("source") == "Zillow":
+    if apt.get("source") in ("Zillow", "Apartments.com", "Local site"):
         nm = (apt.get("name") or "").split(" · ")[0].strip()
         return nm or None
     # Craigslist private rentals have no review page; skip unless clearly a named complex.
     return None
 
+_RATINGS_TTL = 30 * 24 * 3600   # ratings change slowly — cache for 30 days
+
+def _ratings_cache_file():
+    return project_dir() / "data" / ".ratings_cache.json"
+
+def _load_ratings_cache():
+    try:
+        return json.loads(_ratings_cache_file().read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _save_ratings_cache(cache):
+    try:
+        f = _ratings_cache_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(cache), encoding="utf-8")
+    except Exception:
+        pass
+
 def _enrich_reviews(apts, criteria):
-    """Batch-fetch Google ratings for named properties (deduped) and attach them."""
+    """Batch-fetch Google + Yelp ratings for named properties (deduped) and attach them.
+    Cached results (<30 days) are reused so repeat runs skip the slow browser lookups."""
     city = f"{criteria['location']}, {criteria['state']}"
     by_name = {}
     for i, apt in enumerate(apts):
@@ -1708,21 +1960,49 @@ def _enrich_reviews(apts, criteria):
             by_name.setdefault(nm, []).append(i)
     if not by_name:
         return
-    print(f"  Looking up Google ratings for {len(by_name)} named properties...")
-    queries = [(nm, f"{nm} {city}") for nm in by_name]
-    try:
-        results = asyncio.run(_fetch_google_ratings(queries))
-    except Exception:
-        results = {}
+    ykey = criteria.get("yelp_key")
+    cache = _load_ratings_cache()
+    now = time.time()
+    fresh, todo = {}, []
+    for nm in by_name:
+        e = cache.get(f"{nm}|{city}".lower())
+        # Re-fetch if stale, or if we now have a Yelp key but the cached entry has no Yelp data.
+        stale = not e or (now - e.get("ts", 0) >= _RATINGS_TTL)
+        if not stale and ykey and not e.get("y"):
+            stale = True
+        if stale:
+            todo.append(nm)
+        else:
+            fresh[nm] = e
+    label = "Google + Yelp" if ykey else "Google"
+    print(f"  Looking up {label} ratings for {len(by_name)} named properties "
+          f"({len(fresh)} cached, {len(todo)} to fetch)...")
+    if todo:
+        try:
+            gmap = asyncio.run(_fetch_ratings([(nm, nm, city) for nm in todo]))
+        except Exception:
+            gmap = {}
+        for nm in todo:
+            y = _fetch_yelp_api(nm, city, ykey) if ykey else None
+            rec = {"g": gmap.get(nm), "y": y, "ts": now}
+            cache[f"{nm}|{city}".lower()] = rec
+            fresh[nm] = rec
+        _save_ratings_cache(cache)
     for nm, idxs in by_name.items():
-        url = ("https://www.google.com/maps/search/?api=1&query="
-               + urllib.parse.quote_plus(f"{nm} {city}"))
-        rc = results.get(nm)
+        gurl = ("https://www.google.com/maps/search/?api=1&query="
+                + urllib.parse.quote_plus(f"{nm} {city}"))
+        rec = fresh.get(nm) or {}
+        g = rec.get("g")
+        y = rec.get("y")
         for i in idxs:
-            apts[i]["google_url"] = url
-            if rc:
-                apts[i]["google_rating"] = rc[0]
-                apts[i]["google_count"] = rc[1]
+            apts[i]["google_url"] = gurl
+            if g:
+                apts[i]["google_rating"] = g[0]
+                apts[i]["google_count"] = g[1]
+            if y:
+                apts[i]["yelp_rating"] = y[0]
+                apts[i]["yelp_count"] = y[1]
+                apts[i]["yelp_url"] = y[2]
 
 def enrich_apartments(apts, criteria, metro_coords, work_coords):
     print(f"\nEnriching {len(apts)} listings with distance data and reviews...")
@@ -1781,6 +2061,11 @@ def enrich_apartments(apts, criteria, metro_coords, work_coords):
         pet_blob = f"{apt.get('raw_name','')} {apt.get('description','')}"
         apt["pets_dogs"], apt["pets_cats"] = detect_pets(pet_blob)
         apt["parking_free"], apt["parking_price"] = detect_parking(pet_blob)
+
+        # Amenities: normalize from the listing text plus any explicit amenity list (e.g. the
+        # Apartments.com bookmarklet captures one) into a single shared vocabulary.
+        amen_blob = f"{pet_blob} {' '.join(apt.get('amenities') or [])}"
+        apt["amenities"] = detect_amenities(amen_blob)
 
         # Multiple photos: Craigslist detail pages carry the full gallery; pull them so
         # the report can show more than one picture. (Ratings handled in batch above.)
@@ -2024,6 +2309,8 @@ input[type=range] {{ width: 100%; accent-color: var(--accent); height: 1px; curs
 .m-rev-row:hover .score {{ color: var(--accent); }}
 .m-sec {{ margin-bottom: 2rem; }}
 .m-sec-title {{ font-size: .62rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--text3); margin-bottom: 1.1rem; padding-bottom: 0; border-bottom: none; }}
+.m-chips {{ display: flex; flex-wrap: wrap; gap: .5rem; }}
+.m-chip {{ font-size: .76rem; color: var(--text2); background: var(--bg2, rgba(127,127,127,.10)); border: 1px solid var(--border); border-radius: 999px; padding: .3rem .7rem; white-space: nowrap; }}
 .m-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem 1.75rem; }}
 .m-cell {{ padding: 0; background: transparent; border-radius: 0; border-bottom: 1px solid var(--border); padding-bottom: .7rem; }}
 .m-cell .lbl {{ font-size: .64rem; text-transform: uppercase; letter-spacing: .1em; color: var(--text3); }}
@@ -2313,6 +2600,11 @@ function openModal(idx) {{
   const transit   = a.transit_time ? `${{a.transit_distance}} · ${{a.transit_time}}` : (a.drive_mins ? `~${{a.drive_mins}} min drive` : '—');
   const prosHTML  = (a.pros||[]).length ? (a.pros||[]).map(p=>`<li>${{p}}</li>`).join('') : '<li style="color:var(--text3)">None noted</li>';
   const consHTML  = (a.cons||[]).length ? (a.cons||[]).map(c=>`<li>${{c}}</li>`).join('') : '<li style="color:var(--text3)">None noted</li>';
+  const amenHTML  = (a.amenities||[]).length
+    ? `<div class="m-sec">
+         <div class="m-sec-title">Amenities</div>
+         <div class="m-chips">${{(a.amenities||[]).map(x=>`<span class="m-chip">${{x}}</span>`).join('')}}</div>
+       </div>` : '';
 
   const gRev = a.google_rating
     ? `<a class="m-rev-row" href="${{a.google_url||'#'}}" target="_blank" rel="noopener">
@@ -2352,6 +2644,8 @@ function openModal(idx) {{
           <div class="m-cell"><div class="lbl">Source</div><div class="val">${{a.source}}</div></div>
         </div>
       </div>
+
+      ${{amenHTML}}
 
       <div class="m-sec">
         <div class="m-sec-title">Monthly costs</div>
@@ -2508,6 +2802,8 @@ def main():
                 apartments += scrape_apartments_from_json(criteria, criteria["apartments_json"])
             else:
                 apartments += scrape_apartments_com(criteria, driver)
+            if criteria.get("sites"):
+                apartments += scrape_local_sites(criteria, driver)
             # HotPads removed: it's Zillow-owned (inventory overlaps the Zillow bookmarklet)
             # and reliably throws its own Press & Hold check, wasting ~25s for 0 results.
         except Exception as e:
